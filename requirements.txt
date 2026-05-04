@@ -1,0 +1,5 @@
+numpy
+polars
+matplotlib
+PySide6
+pyqtgraph

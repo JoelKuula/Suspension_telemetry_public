@@ -1,0 +1,7 @@
+.pio/
+.pio-core/
+.tools/
+.codex_tmp/
+__pycache__/
+exports/
+
