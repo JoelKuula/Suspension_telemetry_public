@@ -28,6 +28,7 @@ from .backend.analysis_service import (
     compute_velocity_histogram,
     normalize_velocity_axis_mode,
 )
+from .backend.braking_analysis import build_fork_braking_analysis, normalize_braking_config
 from .backend.context_analysis import (
     ACCEL_AXIS_OPTIONS,
     DEFAULT_CONTEXT_CONFIG,
@@ -54,7 +55,7 @@ from .backend.session_metadata_service import (
     save_session_metadata,
     scan_session_database,
 )
-from .backend.session_config import DEFAULT_BREAKDOWN_CONFIG, analysis_dir, save_session_config
+from .backend.session_config import DEFAULT_BRAKING_CONFIG, DEFAULT_BREAKDOWN_CONFIG, analysis_dir, save_session_config
 from .backend.session_service import SessionBundle, open_bin_session, open_export_session, rebuild_session_analysis
 
 
@@ -97,10 +98,6 @@ CALIBRATION_CONFIG_KEYS = (
     "mm_per_count",
     "full_scale_mm",
     "sensor_full_scale_mm",
-    "travel_reference",
-    "reference_method",
-    "reference_percentile",
-    "reference_window_samples",
     "manual_reference_count",
     "velocity_filter_window",
 )
@@ -112,11 +109,9 @@ def format_metric_value(value: Any) -> str:
     if isinstance(value, (int, np.integer)):
         return f"{int(value)}"
     if isinstance(value, (float, np.floating)):
-        if abs(float(value)) >= 1000:
-            return f"{float(value):.1f}"
-        if abs(float(value)) >= 10:
-            return f"{float(value):.2f}"
-        return f"{float(value):.4f}"
+        if not np.isfinite(float(value)):
+            return ""
+        return f"{float(value):.2f}"
     return str(value)
 
 
@@ -398,6 +393,26 @@ def format_delta_value(value: Any) -> str:
     return formatted if numeric < 0 else f"+{formatted}"
 
 
+RIDING_METRIC_ROWS: tuple[tuple[str, str | None, str | None, str | None], ...] = (
+    ("Session duration", "Session duration", None, None),
+    ("Minimum", "Minimum travel", None, "Peak rebound velocity"),
+    ("Maximum", "Maximum travel", "Peak compression velocity", None),
+    ("Mean", "Mean position", "Mean compression velocity", "Mean rebound velocity"),
+    ("Median", "Median position", "Median compression velocity", "Median rebound velocity"),
+    ("Mode", "Mode position", "Mode compression velocity", "Mode rebound velocity"),
+    ("Geometric SD", "Position geometric SD", "Compression velocity geometric SD", "Rebound velocity geometric SD"),
+    *(
+        (
+            f"P{band_start}-{band_start + 10}",
+            f"Position P{band_start}-{band_start + 10}",
+            f"Compression velocity P{band_start}-{band_start + 10}",
+            f"Rebound velocity P{band_start}-{band_start + 10}",
+        )
+        for band_start in range(0, 100, 10)
+    ),
+)
+
+
 def build_metrics_table_widget() -> QtWidgets.QTableWidget:
     table = QtWidgets.QTableWidget(0, 5)
     table.setHorizontalHeaderLabels(["Metric", "Front", "Front units", "Rear", "Rear units"])
@@ -539,7 +554,7 @@ class _OccupancyPane(QtWidgets.QWidget):
             travel_max - travel_min,
         ))
         plot_item = self.plot_widget.getPlotItem()
-        plot_item.setTitle(f"{occupancy['channel'].capitalize()} occupancy")
+        plot_item.setTitle(f"{occupancy['channel'].capitalize()} position/velocity heatmap")
         plot_item.setLabel("bottom", occupancy.get("velocity_label", "Velocity"), units=occupancy["velocity_units"])
         plot_item.setLabel("left", occupancy.get("travel_label", "Travel"), units=occupancy["travel_units"])
         _apply_velocity_axis_ticks(plot_item, occupancy.get("velocity_axis_ticks"))
@@ -618,12 +633,12 @@ class _ChannelHistogramsPane(QtWidgets.QWidget):
                 pen=pg.mkPen("#0b84a5"),
             )
         )
-        self.travel_plot.setTitle(f"{channel.capitalize()} travel occupancy")
+        self.travel_plot.setTitle(f"{channel.capitalize()} position distribution")
         self.travel_plot.setLabel("bottom", travel_hist.get("label", "Travel"), units=travel_hist["units"])
         _apply_velocity_axis_ticks(self.travel_plot.getPlotItem(), None)
         self.travel_plot.setLabel(
             "left",
-            travel_hist.get("occupancy_label", "Occupancy"),
+            travel_hist.get("occupancy_label", "Time in bin"),
             units=travel_hist.get("occupancy_units", "s"),
         )
         if travel_hist["units"] == "%":
@@ -655,12 +670,12 @@ class _ChannelHistogramsPane(QtWidgets.QWidget):
         self.velocity_plot.addItem(
             pg.InfiniteLine(pos=0.0, angle=90, pen=pg.mkPen("#808080", style=QtCore.Qt.PenStyle.DashLine))
         )
-        self.velocity_plot.setTitle(f"{channel.capitalize()} velocity occupancy")
+        self.velocity_plot.setTitle(f"{channel.capitalize()} velocity distribution")
         self.velocity_plot.setLabel("bottom", velocity_hist.get("label", "Velocity"), units=velocity_hist["units"])
         _apply_velocity_axis_ticks(self.velocity_plot.getPlotItem(), velocity_hist.get("velocity_axis_ticks"))
         self.velocity_plot.setLabel(
             "left",
-            velocity_hist.get("occupancy_label", "Occupancy"),
+            velocity_hist.get("occupancy_label", "Time in bin"),
             units=velocity_hist.get("occupancy_units", "s"),
         )
 
@@ -821,7 +836,7 @@ class CompareWidget(QtWidgets.QWidget):
         plot_item.setTitle(title)
         plot_item.setLabel("bottom", label, units=units)
         _apply_velocity_axis_ticks(plot_item, axis_ticks)
-        occupancy_label = "Occupancy"
+        occupancy_label = "Time in bin"
         occupancy_units = "s"
         if histograms:
             occupancy_label = histograms[0][1].get("occupancy_label", occupancy_label)
@@ -863,7 +878,7 @@ class CompareWidget(QtWidgets.QWidget):
         plot_item.setTitle(title)
         plot_item.setLabel("bottom", label, units=units)
         _apply_velocity_axis_ticks(plot_item, axis_ticks)
-        occupancy_label = "Occupancy"
+        occupancy_label = "Time in bin"
         occupancy_units = "s"
         if histograms:
             occupancy_label = histograms[0][1].get("occupancy_label", occupancy_label)
@@ -939,7 +954,7 @@ class CompareWidget(QtWidgets.QWidget):
             "Compare:\n"
             + "\n".join(f"  {bundle_session_label(bundle)}" for bundle in bundles)
             + "\n"
-            "Travel and velocity plots use relative occupancy (%) on normalized %stroke axes."
+            "Travel and velocity plots use relative time (%) on normalized %stroke axes."
         )
 
         travel_hist_range = (0.0, 100.0)
@@ -1001,7 +1016,7 @@ class CompareWidget(QtWidgets.QWidget):
         self._set_overlay_histogram(
             self.front_travel_plot,
             self.front_travel_legend,
-            "Front travel occupancy",
+            "Front position distribution",
             front_travel_histograms[0][1]["label"],
             front_travel_histograms[0][1]["units"],
             front_travel_histograms,
@@ -1010,7 +1025,7 @@ class CompareWidget(QtWidgets.QWidget):
         self._set_overlay_histogram(
             self.rear_travel_plot,
             self.rear_travel_legend,
-            "Rear travel occupancy",
+            "Rear position distribution",
             rear_travel_histograms[0][1]["label"],
             rear_travel_histograms[0][1]["units"],
             rear_travel_histograms,
@@ -1019,7 +1034,7 @@ class CompareWidget(QtWidgets.QWidget):
         self._set_overlay_bar_histogram(
             self.front_velocity_plot,
             self.front_velocity_legend,
-            "Front velocity occupancy",
+            "Front velocity distribution",
             front_velocity_histograms[0][1]["label"],
             front_velocity_histograms[0][1]["units"],
             front_velocity_histograms,
@@ -1030,7 +1045,7 @@ class CompareWidget(QtWidgets.QWidget):
         self._set_overlay_bar_histogram(
             self.rear_velocity_plot,
             self.rear_velocity_legend,
-            "Rear velocity occupancy",
+            "Rear velocity distribution",
             rear_velocity_histograms[0][1]["label"],
             rear_velocity_histograms[0][1]["units"],
             rear_velocity_histograms,
@@ -1304,6 +1319,25 @@ class ImuPlotWidget(QtWidgets.QWidget):
             curve.setData([], [])
 
 
+class BlankAnalysisWidget(QtWidgets.QWidget):
+    settings_changed = QtCore.Signal()
+
+    def clear(self) -> None:
+        pass
+
+    def load_settings(self, config: dict[str, Any]) -> None:
+        _ = config
+
+    def current_settings(self) -> dict[str, Any]:
+        return copy.deepcopy(DEFAULT_BREAKDOWN_CONFIG)
+
+    def set_balance_data(self, balance: dict[str, Any]) -> None:
+        _ = balance
+
+    def set_breakdown_analysis(self, analysis: dict[str, Any]) -> None:
+        _ = analysis
+
+
 class BalancePlotWidget(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1424,6 +1458,283 @@ class BalancePlotWidget(QtWidgets.QWidget):
         self.balance_line.setData([], [])
 
 
+class BrakingWidget(QtWidgets.QWidget):
+    settings_changed = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._settings = copy.deepcopy(DEFAULT_BRAKING_CONFIG)
+        self._updating_controls = False
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        layout.addWidget(self.scroll_area, 1)
+
+        self.content_widget = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(self.content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area.setWidget(self.content_widget)
+
+        self.method_label = QtWidgets.QLabel(
+            "Wheel-speed deceleration analysis using the selected absolute or percentile decel threshold. "
+            "Loaded front-fork stroke is compared against same-speed coasting, and the results are further "
+            "analyzed across speed bins."
+        )
+        self.method_label.setWordWrap(True)
+        content_layout.addWidget(self.method_label)
+
+        controls_group = QtWidgets.QGroupBox("Braking controls")
+        controls_layout = QtWidgets.QHBoxLayout(controls_group)
+        self.threshold_type_combo = QtWidgets.QComboBox()
+        self.threshold_type_combo.addItem("Percentile", "percentile")
+        self.threshold_type_combo.addItem("Absolute", "absolute")
+        self.threshold_label_combo = QtWidgets.QComboBox()
+        controls_layout.addWidget(QtWidgets.QLabel("Threshold type"))
+        controls_layout.addWidget(self.threshold_type_combo)
+        controls_layout.addWidget(QtWidgets.QLabel("Selected threshold"))
+        controls_layout.addWidget(self.threshold_label_combo)
+        controls_layout.addStretch(1)
+        content_layout.addWidget(controls_group)
+
+        self.warning_label = QtWidgets.QLabel("")
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet("color: #8a5a00; background: #fff4ce; padding: 6px;")
+        self.warning_label.hide()
+        content_layout.addWidget(self.warning_label)
+
+        self.summary_label = QtWidgets.QLabel("No braking analysis")
+        self.summary_label.setWordWrap(True)
+        content_layout.addWidget(self.summary_label)
+
+        self.key_table = QtWidgets.QTableWidget(0, 6)
+        self.key_table.setHorizontalHeaderLabels(["Section", "Metric", "Value", "Unit", "Status", "Meaning"])
+        self.key_table.horizontalHeader().setStretchLastSection(True)
+        self.key_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._prepare_full_height_table(self.key_table)
+        content_layout.addWidget(self.key_table)
+
+        self.speed_bin_table = QtWidgets.QTableWidget(0, 12)
+        self.speed_bin_table.setHorizontalHeaderLabels(
+            [
+                "Speed bin",
+                "Loaded time",
+                "Events",
+                "Topout %",
+                "Median %",
+                "P90 %",
+                "Coast med %",
+                "Dive %",
+                "Deep80 %",
+                "Rough",
+                "P75 pack %",
+                "Flag",
+            ]
+        )
+        self.speed_bin_table.horizontalHeader().setStretchLastSection(True)
+        self.speed_bin_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._prepare_full_height_table(self.speed_bin_table)
+        content_layout.addWidget(self.speed_bin_table)
+
+        self.event_table = QtWidgets.QTableWidget(0, 10)
+        self.event_table.setHorizontalHeaderLabels(
+            [
+                "ID",
+                "Speed bin",
+                "Start [s]",
+                "Duration [s]",
+                "Entry speed",
+                "Exit speed",
+                "Peak decel",
+                "Max stroke",
+                "P95 stroke",
+                "Pack-down",
+            ]
+        )
+        self.event_table.horizontalHeader().setStretchLastSection(True)
+        self.event_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._prepare_full_height_table(self.event_table)
+        content_layout.addWidget(self.event_table)
+
+        self.flag_table = QtWidgets.QTableWidget(0, 3)
+        self.flag_table.setHorizontalHeaderLabels(["Level", "Topic", "Message"])
+        self.flag_table.horizontalHeader().setStretchLastSection(True)
+        self.flag_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._prepare_full_height_table(self.flag_table)
+        content_layout.addWidget(self.flag_table)
+        content_layout.addStretch(1)
+
+        self.threshold_type_combo.currentIndexChanged.connect(self._on_threshold_type_changed)
+        self.threshold_label_combo.currentIndexChanged.connect(self._emit_settings_changed)
+        self.load_settings(copy.deepcopy(DEFAULT_BRAKING_CONFIG))
+        self.clear()
+
+    @staticmethod
+    def _prepare_full_height_table(table: QtWidgets.QTableWidget) -> None:
+        table.verticalHeader().setVisible(False)
+        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    @staticmethod
+    def _resize_table_to_contents(table: QtWidgets.QTableWidget) -> None:
+        table.resizeColumnsToContents()
+        table.resizeRowsToContents()
+        height = table.horizontalHeader().height() + 2 * table.frameWidth() + 4
+        for row_index in range(table.rowCount()):
+            height += table.rowHeight(row_index)
+        height += table.horizontalScrollBar().sizeHint().height()
+        table.setMinimumHeight(height)
+        table.setMaximumHeight(height)
+
+    def _threshold_labels(self, threshold_type: str) -> list[str]:
+        config = normalize_braking_config(self._settings)
+        if threshold_type == "absolute":
+            return [f"{float(value):.2f} ms2" for value in config["absolute_decel_thresholds_mps2"]]
+        return [f"P{float(value):g}" for value in config["decel_percentiles"]]
+
+    def _set_threshold_label_options(self, threshold_type: str, selected_label: str) -> None:
+        self.threshold_label_combo.blockSignals(True)
+        try:
+            self.threshold_label_combo.clear()
+            labels = self._threshold_labels(threshold_type)
+            if selected_label and selected_label not in labels:
+                labels.append(selected_label)
+            for label in labels:
+                self.threshold_label_combo.addItem(label)
+            index = self.threshold_label_combo.findText(selected_label)
+            self.threshold_label_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self.threshold_label_combo.blockSignals(False)
+
+    def _on_threshold_type_changed(self) -> None:
+        threshold_type = str(self.threshold_type_combo.currentData() or "percentile")
+        selected_label = "3.00 ms2" if threshold_type == "absolute" else "P80"
+        if self._settings.get("selected_threshold_type") == threshold_type:
+            selected_label = str(self._settings.get("selected_threshold_label", selected_label))
+        self._set_threshold_label_options(threshold_type, selected_label)
+        self._emit_settings_changed()
+
+    def _emit_settings_changed(self) -> None:
+        if self._updating_controls:
+            return
+        self.settings_changed.emit()
+
+    def load_settings(self, config: dict[str, Any]) -> None:
+        normalized = normalize_braking_config(config)
+        self._settings = copy.deepcopy(normalized)
+        self._updating_controls = True
+        try:
+            threshold_type = str(normalized.get("selected_threshold_type", normalized["threshold_mode"]))
+            index = self.threshold_type_combo.findData(threshold_type)
+            self.threshold_type_combo.setCurrentIndex(max(index, 0))
+            self._set_threshold_label_options(threshold_type, str(normalized.get("selected_threshold_label", "P80")))
+        finally:
+            self._updating_controls = False
+
+    def current_settings(self) -> dict[str, Any]:
+        settings = copy.deepcopy(self._settings)
+        threshold_type = str(self.threshold_type_combo.currentData() or "percentile")
+        settings["threshold_mode"] = threshold_type
+        settings["selected_threshold_type"] = threshold_type
+        settings["selected_threshold_label"] = self.threshold_label_combo.currentText()
+        return normalize_braking_config(settings)
+
+    def set_braking_analysis(self, analysis: dict[str, Any]) -> None:
+        meta = analysis.get("meta", {})
+        warning = meta.get("warning")
+        if warning:
+            self.warning_label.setText(str(warning))
+            self.warning_label.show()
+        else:
+            self.warning_label.hide()
+        self.summary_label.setText(str(analysis.get("summary_text", "")))
+        self._populate_key_table(analysis.get("key_metrics", []))
+        self._populate_speed_bin_table(analysis.get("speed_bin_rows", []))
+        self._populate_event_table(analysis.get("event_rows", []), meta.get("selected", {}))
+        self._populate_flag_table(analysis.get("flag_rows", []))
+
+    def _populate_key_table(self, rows: list[dict[str, Any]]) -> None:
+        self.key_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                row.get("section", ""),
+                row.get("metric", ""),
+                format_metric_value(row.get("value")),
+                row.get("unit", ""),
+                row.get("status", ""),
+                row.get("meaning", ""),
+            ]
+            for column, value in enumerate(values):
+                self.key_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self._resize_table_to_contents(self.key_table)
+
+    def _populate_speed_bin_table(self, rows: list[dict[str, Any]]) -> None:
+        self.speed_bin_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                row.get("speed_range_kph", ""),
+                format_metric_value(row.get("loaded_time_s")),
+                format_metric_value(row.get("events")),
+                format_metric_value(row.get("topout_pct")),
+                format_metric_value(row.get("loaded_median_stroke_pct")),
+                format_metric_value(row.get("loaded_p90_stroke_pct")),
+                format_metric_value(row.get("coasting_median_stroke_pct")),
+                format_metric_value(row.get("braking_dive_index_pct")),
+                format_metric_value(row.get("deep80_pct")),
+                format_metric_value(row.get("rough_braking_ratio")),
+                format_metric_value(row.get("pack_down_p75_pct")),
+                row.get("flag", ""),
+            ]
+            for column, value in enumerate(values):
+                self.speed_bin_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self._resize_table_to_contents(self.speed_bin_table)
+
+    def _populate_event_table(self, rows: list[dict[str, Any]], selected: dict[str, Any]) -> None:
+        threshold_type = selected.get("threshold_type")
+        threshold_label = selected.get("threshold_label")
+        selected_rows = [
+            row for row in rows
+            if row.get("threshold_type") == threshold_type and row.get("threshold_label") == threshold_label
+        ]
+        self.event_table.setRowCount(len(selected_rows))
+        for row_index, row in enumerate(selected_rows):
+            values = [
+                row.get("global_event_index", ""),
+                row.get("speed_bin", ""),
+                format_metric_value(row.get("start_time_s")),
+                format_metric_value(row.get("duration_s")),
+                format_metric_value(row.get("entry_speed_kph")),
+                format_metric_value(row.get("exit_speed_kph")),
+                format_metric_value(row.get("peak_decel_mps2")),
+                format_metric_value(row.get("max_stroke_pct")),
+                format_metric_value(row.get("p95_stroke_pct")),
+                format_metric_value(row.get("pack_down_pct")),
+            ]
+            for column, value in enumerate(values):
+                self.event_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self._resize_table_to_contents(self.event_table)
+
+    def _populate_flag_table(self, rows: list[dict[str, Any]]) -> None:
+        self.flag_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [row.get("level", ""), row.get("topic", ""), row.get("message", "")]
+            for column, value in enumerate(values):
+                self.flag_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self._resize_table_to_contents(self.flag_table)
+
+    def clear(self) -> None:
+        self.summary_label.setText("No braking analysis")
+        self.warning_label.hide()
+        self.key_table.setRowCount(0)
+        self.speed_bin_table.setRowCount(0)
+        self.event_table.setRowCount(0)
+        self.flag_table.setRowCount(0)
+        for table in (self.key_table, self.speed_bin_table, self.event_table, self.flag_table):
+            self._resize_table_to_contents(table)
+
+
 class ContextAnalysisWidget(QtWidgets.QWidget):
     settings_changed = QtCore.Signal()
 
@@ -1538,7 +1849,7 @@ class ContextAnalysisWidget(QtWidgets.QWidget):
 
         self.summary_table = QtWidgets.QTableWidget(0, 7)
         self.summary_table.setHorizontalHeaderLabels(
-            ["Context bin", "Occupancy [s]", "Mean", "RMS", "P10", "P50", "P90"]
+            ["Context bin", "Time [s]", "Mean", "RMS", "P10", "P50", "P90"]
         )
         self.summary_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.summary_table, 1)
@@ -1638,7 +1949,7 @@ class ContextAnalysisWidget(QtWidgets.QWidget):
             )
         )
         heatmap_item = self.heatmap_plot.getPlotItem()
-        heatmap_item.setTitle(f"{source_info['label']} vs {response_info['label']} occupancy")
+        heatmap_item.setTitle(f"{source_info['label']} vs {response_info['label']} time heatmap")
         heatmap_item.setLabel("bottom", source_info["label"], units=source_info["units"])
         heatmap_item.setLabel("left", response_info["label"], units=response_info["units"])
         heatmap_item.enableAutoRange()
@@ -2393,14 +2704,14 @@ class BreakdownSummaryWidget(QtWidgets.QWidget):
         layout.addWidget(self.warning_label)
 
         self.summary_label = QtWidgets.QLabel(
-            "Occupancy is summarized over five wheel-speed bands derived from session percentiles."
+            "Time is summarized over five wheel-speed bands derived from session percentiles."
         )
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
 
         self.band_table = QtWidgets.QTableWidget(0, 6)
         self.band_table.setHorizontalHeaderLabels(
-            ["Band", "Percentiles", "Speed range [km/h]", "Occupancy [s]", "Occupancy [%]", "Mean speed [km/h]"]
+            ["Band", "Percentiles", "Speed range [km/h]", "Time [s]", "Time [%]", "Mean speed [km/h]"]
         )
         self.band_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.band_table, 1)
@@ -2582,7 +2893,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(session_tab, "Session")
 
         self.signals_widget = SignalsPlotWidget()
-        self.balance_widget = BalancePlotWidget()
+        self.balance_widget = BlankAnalysisWidget()
 
         self.wheel_widget = WheelPlotWidget()
 
@@ -2592,11 +2903,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.histograms_widget, "Histograms")
 
         self.occupancy_widget = OccupancyPlotWidget()
-        self.tabs.addTab(self.occupancy_widget, "Occupancy")
+        self.tabs.addTab(self.occupancy_widget, "Position/Velocity Heatmap")
 
         self.tabs.addTab(self.balance_widget, "Balance")
-        self.breakdown_widget = BreakdownWidget()
-        self.breakdown_widget.settings_changed.connect(self.on_breakdown_settings_changed)
+        self.braking_widget = BrakingWidget()
+        self.braking_widget.settings_changed.connect(self.on_braking_settings_changed)
+        self.tabs.addTab(self.braking_widget, "Braking")
+        self.breakdown_widget = BlankAnalysisWidget()
         self.tabs.addTab(self.breakdown_widget, "Breakdown")
         self.tabs.addTab(self.wheel_widget, "Speed")
 
@@ -2630,28 +2943,10 @@ class MainWindow(QtWidgets.QMainWindow):
             form = QtWidgets.QFormLayout(group)
 
             invert = QtWidgets.QCheckBox("Invert sign")
-            reference_mode = QtWidgets.QComboBox()
-            reference_mode.addItems(["auto", "robust_min", "robust_max", "min", "max", "absolute"])
-            reference_mode.setToolTip(
-                "auto chooses min or max from the session and uses the robust reference settings."
-            )
-            reference_method = QtWidgets.QComboBox()
-            reference_method.addItems(["percentile", "sustained"])
-            reference_method.setToolTip(
-                "percentile uses a low/high percentile anchor; sustained requires an N-sample window."
-            )
-            reference_percentile = QtWidgets.QDoubleSpinBox()
-            reference_percentile.setRange(0.0001, 5.0)
-            reference_percentile.setDecimals(4)
-            reference_percentile.setSingleStep(0.001)
-            reference_percentile.setToolTip("Low/high percentile used by robust percentile anchoring.")
-            reference_window = QtWidgets.QSpinBox()
-            reference_window.setRange(1, 500)
-            reference_window.setToolTip("Sample window used by robust sustained anchoring.")
             manual_reference = QtWidgets.QLineEdit()
             manual_reference.setPlaceholderText("raw ADC count")
             manual_reference.setToolTip(
-                "Optional manual raw ADC anchor. When set, it overrides the automatic min/max anchor."
+                "Manual raw ADC anchor used as the travel-zero reference. Leave empty to show calibrated raw counts unanchored."
             )
             velocity_filter_window = QtWidgets.QSpinBox()
             velocity_filter_window.setRange(1, 999)
@@ -2663,20 +2958,12 @@ class MainWindow(QtWidgets.QMainWindow):
             calibration_summary.setWordWrap(True)
 
             form.addRow("", invert)
-            form.addRow("Reference", reference_mode)
-            form.addRow("Robust method", reference_method)
-            form.addRow("Reference pct", reference_percentile)
-            form.addRow("Sustained window", reference_window)
             form.addRow("Manual anchor", manual_reference)
             form.addRow("Velocity window", velocity_filter_window)
             form.addRow("Stroke model", calibration_summary)
 
             self.channel_controls[channel] = {
                 "invert": invert,
-                "reference_mode": reference_mode,
-                "reference_method": reference_method,
-                "reference_percentile": reference_percentile,
-                "reference_window": reference_window,
                 "manual_reference": manual_reference,
                 "velocity_filter_window": velocity_filter_window,
                 "calibration_summary": calibration_summary,
@@ -2721,11 +3008,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_views_from_controls)
         layout.addWidget(self.refresh_button)
 
-        self.save_png_button = QtWidgets.QPushButton("Save Occupancy PNG...")
+        self.save_png_button = QtWidgets.QPushButton("Save Heatmap PNG...")
         self.save_png_button.clicked.connect(self.save_occupancy_png)
         layout.addWidget(self.save_png_button)
 
-        self.save_grid_button = QtWidgets.QPushButton("Save Occupancy Grid CSV...")
+        self.save_grid_button = QtWidgets.QPushButton("Save Heatmap Grid CSV...")
         self.save_grid_button.clicked.connect(self.save_occupancy_grid)
         layout.addWidget(self.save_grid_button)
 
@@ -2858,16 +3145,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 config = bundle.session_config[channel]
                 controls = self.channel_controls[channel]
                 controls["invert"].setChecked(bool(config.get("invert", False)))
-                reference_mode = str(config.get("travel_reference", "auto"))
-                if controls["reference_mode"].findText(reference_mode) < 0:
-                    controls["reference_mode"].addItem(reference_mode)
-                controls["reference_mode"].setCurrentText(reference_mode)
-                reference_method = str(config.get("reference_method", "percentile"))
-                if controls["reference_method"].findText(reference_method) < 0:
-                    controls["reference_method"].addItem(reference_method)
-                controls["reference_method"].setCurrentText(reference_method)
-                controls["reference_percentile"].setValue(float(config.get("reference_percentile", 0.001)))
-                controls["reference_window"].setValue(int(config.get("reference_window_samples", 3)))
                 manual_reference = config.get("manual_reference_count")
                 controls["manual_reference"].setText(
                     "" if manual_reference in (None, "") else f"{float(manual_reference):g}"
@@ -2884,6 +3161,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 normalize_velocity_axis_mode(str(plot_defaults.get("velocity_axis_mode", "linear")))
             )
             self.velocity_axis_combo.setCurrentIndex(max(velocity_axis_index, 0))
+            self.braking_widget.load_settings(bundle.session_config.get("braking", copy.deepcopy(DEFAULT_BRAKING_CONFIG)))
             self.breakdown_widget.load_settings(bundle.session_config.get("breakdown", copy.deepcopy(DEFAULT_BREAKDOWN_CONFIG)))
         finally:
             self._loading_controls = False
@@ -2932,22 +3210,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _describe_channel_calibration(self, channel: str, config: dict[str, Any]) -> str:
         full_scale_mm = config.get("full_scale_mm")
         sensor_full_scale_mm = config.get("sensor_full_scale_mm")
-        reference = str(config.get("travel_reference", "auto"))
-        method = str(config.get("reference_method", "percentile"))
-        percentile = config.get("reference_percentile", 0.001)
-        window_samples = config.get("reference_window_samples", 3)
         manual_reference = config.get("manual_reference_count")
         if manual_reference not in (None, ""):
             reference_text = f"Manual raw anchor {format_metric_value(float(manual_reference))} counts."
-        elif reference in {"auto", "robust_min", "robust_max"}:
-            if method == "sustained":
-                reference_text = f"Robust {reference} anchor uses sustained {int(window_samples)}-sample windows."
-            else:
-                reference_text = f"Robust {reference} anchor uses the {format_metric_value(float(percentile))}% percentile."
-        elif reference in {"min", "max"}:
-            reference_text = f"Absolute {reference} anchor uses the single observed extreme."
         else:
-            reference_text = "Absolute raw travel uses no topout anchor."
+            reference_text = "No manual raw anchor is set; calibrated raw counts are shown unanchored."
         if full_scale_mm not in (None, "") and sensor_full_scale_mm not in (None, ""):
             return (
                 f"{reference_text} Stroke is scaled to "
@@ -2964,14 +3231,13 @@ class MainWindow(QtWidgets.QMainWindow):
             controls = self.channel_controls[channel]
             channel_config = copy.deepcopy(config.get(channel, {}))
             channel_config["invert"] = controls["invert"].isChecked()
-            channel_config["travel_reference"] = controls["reference_mode"].currentText()
-            channel_config["reference_method"] = controls["reference_method"].currentText()
-            channel_config["reference_percentile"] = controls["reference_percentile"].value()
-            channel_config["reference_window_samples"] = controls["reference_window"].value()
+            channel_config["travel_reference"] = "manual"
             channel_config["manual_reference_count"] = parse_optional_float(
                 controls["manual_reference"].text(),
                 f"{channel} manual anchor",
             )
+            for obsolete_key in ("reference_method", "reference_percentile", "reference_window_samples"):
+                channel_config.pop(obsolete_key, None)
             channel_config["velocity_filter_window"] = controls["velocity_filter_window"].value()
             config[channel] = channel_config
         config["plot_defaults"] = {
@@ -2981,6 +3247,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "occupancy_color_scale": self.color_scale_combo.currentText(),
             "velocity_axis_mode": self._current_velocity_axis_mode(),
         }
+        config["braking"] = self.braking_widget.current_settings()
         return config
 
     def on_view_settings_changed(self) -> None:
@@ -2995,6 +3262,13 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         save_session_config(self.current_bundle.export_dir, self.current_bundle.session_config)
         self._refresh_plot_views()
+
+    def on_braking_settings_changed(self) -> None:
+        if self._loading_controls or self.current_bundle is None:
+            return
+        self.current_bundle.session_config["braking"] = self.braking_widget.current_settings()
+        save_session_config(self.current_bundle.export_dir, self.current_bundle.session_config)
+        self._refresh_braking_tab()
 
     def on_breakdown_settings_changed(self) -> None:
         if self.current_bundle is None:
@@ -3465,6 +3739,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_metadata_controls_enabled(False)
             self.signals_widget.clear()
             self.balance_widget.clear()
+            self.braking_widget.clear()
             self.breakdown_widget.clear()
             self.wheel_widget.clear()
             self.imu_widget.clear()
@@ -3491,6 +3766,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_analysis_views(self) -> None:
         self._refresh_balance_tab()
+        self._refresh_braking_tab()
         self._refresh_breakdown_tab()
         self._refresh_occupancy_tab()
         self._refresh_histograms_tab()
@@ -3520,33 +3796,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.signals_widget.set_series(channel, series)
 
     def _refresh_balance_tab(self) -> None:
-        derived_df = self._active_derived_df()
-        if derived_df is None:
-            return
-        balance = compute_balance_analysis(derived_df)
-        self.balance_widget.set_balance_data(balance)
+        self.balance_widget.clear()
 
-    def _refresh_breakdown_tab(self) -> None:
-        if self.current_bundle is None:
-            self.breakdown_widget.clear()
-            return
+    def _refresh_braking_tab(self) -> None:
         derived_df = self._active_derived_df()
-        if derived_df is None:
-            self.breakdown_widget.clear()
+        if self.current_bundle is None or derived_df is None:
+            self.braking_widget.clear()
             return
-        try:
-            breakdown_config = self.breakdown_widget.current_settings()
-        except ValueError as exc:
-            self.status_label.setText("Invalid breakdown setting")
-            QtWidgets.QMessageBox.warning(self, "Invalid breakdown value", str(exc))
-            return
-        analysis = build_breakdown_analysis(
+        analysis = build_fork_braking_analysis(
             derived_df=derived_df,
             wheel_df=self.current_bundle.wheel_df,
-            imu_frame_df=self.current_bundle.imu_frame_df,
-            breakdown_config=breakdown_config,
+            config=self.current_bundle.session_config.get("braking", copy.deepcopy(DEFAULT_BRAKING_CONFIG)),
         )
-        self.breakdown_widget.set_breakdown_analysis(analysis)
+        self.braking_widget.set_braking_analysis(analysis)
+
+    def _refresh_breakdown_tab(self) -> None:
+        self.breakdown_widget.clear()
 
     def _refresh_wheel_tab(self) -> None:
         if self.current_bundle is None:
@@ -3644,6 +3909,12 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         category: str,
     ) -> None:
+        if category == "riding":
+            MainWindow._populate_riding_metrics_table(table, front_metrics, rear_metrics)
+            return
+
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(["Metric", "Front", "Front units", "Rear", "Rear units"])
         front_rows = [
             metric
             for metric in front_metrics
@@ -3669,14 +3940,82 @@ class MainWindow(QtWidgets.QMainWindow):
                 table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
         table.resizeColumnsToContents()
 
+    @staticmethod
+    def _visible_metric_map(metrics: list[dict[str, Any]], category: str) -> dict[str, dict[str, Any]]:
+        return {
+            str(metric["metric"]): metric
+            for metric in metrics
+            if metric.get("category") == category and metric.get("metrics_tab_visible", True)
+        }
+
+    @staticmethod
+    def _metric_or_empty(metric_map: dict[str, dict[str, Any]], metric_name: str | None) -> dict[str, Any]:
+        if metric_name is None:
+            return {"value": None, "units": ""}
+        return metric_map.get(metric_name, {"value": None, "units": ""})
+
+    @staticmethod
+    def _populate_riding_metrics_table(
+        table: QtWidgets.QTableWidget,
+        front_metrics: list[dict[str, Any]],
+        rear_metrics: list[dict[str, Any]],
+    ) -> None:
+        table.setColumnCount(13)
+        table.setHorizontalHeaderLabels(
+            [
+                "Metric",
+                "Front position",
+                "Units",
+                "Front compression",
+                "Units",
+                "Front rebound",
+                "Units",
+                "Rear position",
+                "Units",
+                "Rear compression",
+                "Units",
+                "Rear rebound",
+                "Units",
+            ]
+        )
+        front_metric_map = MainWindow._visible_metric_map(front_metrics, "riding")
+        rear_metric_map = MainWindow._visible_metric_map(rear_metrics, "riding")
+
+        table.setRowCount(len(RIDING_METRIC_ROWS))
+        for row_index, (row_label, position_metric_name, compression_metric_name, rebound_metric_name) in enumerate(RIDING_METRIC_ROWS):
+            front_position = MainWindow._metric_or_empty(front_metric_map, position_metric_name)
+            front_compression = MainWindow._metric_or_empty(front_metric_map, compression_metric_name)
+            front_rebound = MainWindow._metric_or_empty(front_metric_map, rebound_metric_name)
+            rear_position = MainWindow._metric_or_empty(rear_metric_map, position_metric_name)
+            rear_compression = MainWindow._metric_or_empty(rear_metric_map, compression_metric_name)
+            rear_rebound = MainWindow._metric_or_empty(rear_metric_map, rebound_metric_name)
+            values = [
+                row_label,
+                format_metrics_table_value(front_position),
+                front_position.get("units", ""),
+                format_metrics_table_value(front_compression),
+                front_compression.get("units", ""),
+                format_metrics_table_value(front_rebound),
+                front_rebound.get("units", ""),
+                format_metrics_table_value(rear_position),
+                rear_position.get("units", ""),
+                format_metrics_table_value(rear_compression),
+                rear_compression.get("units", ""),
+                format_metrics_table_value(rear_rebound),
+                rear_rebound.get("units", ""),
+            ]
+            for column, value in enumerate(values):
+                table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        table.resizeColumnsToContents()
+
     def save_occupancy_png(self) -> None:
         if self.current_bundle is None or self.current_occupancy is None:
             return
         channel = self.selected_channel()
-        default_path = analysis_dir(self.current_bundle.export_dir) / "plots" / f"{self.current_bundle.export_dir.name}_{channel}_occupancy.png"
+        default_path = analysis_dir(self.current_bundle.export_dir) / "plots" / f"{self.current_bundle.export_dir.name}_{channel}_heatmap.png"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save occupancy PNG",
+            "Save heatmap PNG",
             str(default_path),
             "PNG files (*.png)",
         )
@@ -3689,10 +4028,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_bundle is None or self.current_occupancy is None:
             return
         channel = self.selected_channel()
-        default_path = analysis_dir(self.current_bundle.export_dir) / "plots" / f"{self.current_bundle.export_dir.name}_{channel}_occupancy.csv"
+        default_path = analysis_dir(self.current_bundle.export_dir) / "plots" / f"{self.current_bundle.export_dir.name}_{channel}_heatmap.csv"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save occupancy grid CSV",
+            "Save heatmap grid CSV",
             str(default_path),
             "CSV files (*.csv)",
         )

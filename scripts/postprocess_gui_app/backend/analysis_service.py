@@ -8,9 +8,6 @@ import numpy as np
 import polars as pl
 
 from .session_config import (
-    DEFAULT_REFERENCE_METHOD,
-    DEFAULT_REFERENCE_PERCENTILE,
-    DEFAULT_REFERENCE_WINDOW_SAMPLES,
     analysis_dir,
     build_analysis_signature,
     channel_mm_per_count,
@@ -20,10 +17,9 @@ from .session_config import (
 DERIVED_ANALOG_FILENAME = "derived_analog.parquet"
 BALANCE_ACTIVE_THRESHOLD_PCT = 10.0
 BALANCE_NEUTRAL_BAND_PCT = 10.0
-REFERENCE_LOW_PERCENTILE = 1.0
-REFERENCE_HIGH_PERCENTILE = 99.0
 OCCUPANCY_MODE_BINS = 100
 OCCUPANCY_MODE_SMOOTH_SIGMA_BINS = 2.0
+POSITION_BAND_WIDTH_PCT = 10
 VELOCITY_AXIS_LINEAR = "linear"
 VELOCITY_AXIS_SIGNED_LOG = "signed_log"
 VALID_VELOCITY_AXIS_MODES = {VELOCITY_AXIS_LINEAR, VELOCITY_AXIS_SIGNED_LOG}
@@ -152,80 +148,6 @@ def estimate_default_zero_count(raw_values: np.ndarray) -> int:
     return int(round(float(np.median(window))))
 
 
-def _finite_percentile(values: np.ndarray, percentile: float) -> float | None:
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return None
-    return float(np.percentile(finite, percentile))
-
-
-def _finite_extreme(values: np.ndarray, which: str) -> float | None:
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return None
-    if which == "min":
-        return float(np.min(finite))
-    if which == "max":
-        return float(np.max(finite))
-    raise ValueError(f"unsupported extreme selector: {which}")
-
-
-def _finite_values(values: np.ndarray) -> np.ndarray:
-    return values[np.isfinite(values)]
-
-
-def _robust_percentile_reference(values: np.ndarray, which: str, percentile: float) -> float | None:
-    finite = _finite_values(values)
-    if finite.size == 0:
-        return None
-    clipped_percentile = min(max(float(percentile), 0.0001), 50.0)
-    if which == "min":
-        return float(np.percentile(finite, clipped_percentile))
-    if which == "max":
-        return float(np.percentile(finite, 100.0 - clipped_percentile))
-    raise ValueError(f"unsupported robust reference selector: {which}")
-
-
-def _rolling_window_view(values: np.ndarray, window: int) -> np.ndarray | None:
-    finite = _finite_values(values)
-    if finite.size == 0:
-        return None
-    window = max(1, int(window))
-    if finite.size < window:
-        return None
-    shape = (finite.size - window + 1, window)
-    strides = (finite.strides[0], finite.strides[0])
-    return np.lib.stride_tricks.as_strided(finite, shape=shape, strides=strides)
-
-
-def _sustained_reference(values: np.ndarray, which: str, window: int) -> float | None:
-    windows = _rolling_window_view(values, window)
-    if windows is None:
-        return _finite_extreme(values, which)
-    if which == "min":
-        return float(np.min(np.max(windows, axis=1)))
-    if which == "max":
-        return float(np.max(np.min(windows, axis=1)))
-    raise ValueError(f"unsupported sustained reference selector: {which}")
-
-
-def _robust_reference(
-    values: np.ndarray,
-    which: str,
-    *,
-    method: str,
-    percentile: float,
-    window_samples: int,
-) -> tuple[float | None, str]:
-    normalized_method = method if method in {"percentile", "sustained"} else DEFAULT_REFERENCE_METHOD
-    if normalized_method == "sustained":
-        return _sustained_reference(values, which, window_samples), f"sustained-{which}-n{max(1, int(window_samples))}"
-    return (
-        _robust_percentile_reference(values, which, percentile),
-        f"p{min(max(float(percentile), 0.0001), 50.0):g}-{which}",
-    )
-
-
 def _ensure_odd_window(window: int) -> int:
     if window < 1:
         return 1
@@ -252,84 +174,16 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def choose_auto_reference(position_counts: np.ndarray) -> str:
-    if position_counts.size == 0:
-        return "absolute"
-    initial_window = position_counts[: min(position_counts.size, 250)]
-    initial_level = float(np.median(initial_window))
-    span_min = _finite_percentile(position_counts, REFERENCE_LOW_PERCENTILE)
-    span_max = _finite_percentile(position_counts, REFERENCE_HIGH_PERCENTILE)
-    if span_min is None or span_max is None:
-        return "absolute"
-    if abs(initial_level - span_max) <= abs(initial_level - span_min):
-        return "max"
-    return "min"
-
-
 def apply_travel_reference(
     position_counts: np.ndarray,
-    reference_mode: str,
     *,
-    reference_method: str = DEFAULT_REFERENCE_METHOD,
-    reference_percentile: float = DEFAULT_REFERENCE_PERCENTILE,
-    reference_window_samples: int = DEFAULT_REFERENCE_WINDOW_SAMPLES,
     manual_reference_count: float | None = None,
 ) -> tuple[np.ndarray, str]:
     if position_counts.size == 0:
-        return position_counts.copy(), "absolute"
-
-    resolved_mode = reference_mode
-    if reference_mode == "auto":
-        resolved_mode = choose_auto_reference(position_counts)
-    elif reference_mode == "robust_min":
-        resolved_mode = "min"
-    elif reference_mode == "robust_max":
-        resolved_mode = "max"
-
-    lower_reference = _finite_extreme(position_counts, "min")
-    upper_reference = _finite_extreme(position_counts, "max")
-    if lower_reference is None or upper_reference is None:
-        return position_counts.copy(), "absolute"
-
-    if resolved_mode == "absolute":
-        return position_counts.copy(), "absolute"
-
-    if resolved_mode in {"min", "max"} and manual_reference_count is not None:
-        anchor = float(manual_reference_count)
-        if resolved_mode == "min":
-            return position_counts - anchor, "relative-from-manual-min"
-        return anchor - position_counts, "relative-from-manual-max"
-
-    robust_requested = reference_mode in {"auto", "robust_min", "robust_max"}
-    if resolved_mode == "min":
-        if robust_requested:
-            anchor, label = _robust_reference(
-                position_counts,
-                "min",
-                method=reference_method,
-                percentile=reference_percentile,
-                window_samples=reference_window_samples,
-            )
-            if anchor is None:
-                anchor = lower_reference
-                label = "absolute-min"
-            return position_counts - anchor, f"relative-from-robust-{label}"
-        return position_counts - lower_reference, "relative-from-absolute-min"
-    if resolved_mode == "max":
-        if robust_requested:
-            anchor, label = _robust_reference(
-                position_counts,
-                "max",
-                method=reference_method,
-                percentile=reference_percentile,
-                window_samples=reference_window_samples,
-            )
-            if anchor is None:
-                anchor = upper_reference
-                label = "absolute-max"
-            return anchor - position_counts, f"relative-from-robust-{label}"
-        return upper_reference - position_counts, "relative-from-absolute-max"
-    raise ValueError(f"unsupported travel reference: {reference_mode}")
+        return position_counts.copy(), "unanchored-no-manual-anchor"
+    if manual_reference_count is None:
+        return position_counts.copy(), "unanchored-no-manual-anchor"
+    return position_counts - float(manual_reference_count), "relative-from-manual-anchor"
 
 
 def _series_to_numpy(frame: pl.DataFrame, column: str, fill_value: float = np.nan) -> np.ndarray:
@@ -366,12 +220,6 @@ def _channel_arrays(
 ) -> dict[str, Any]:
     sign = -1.0 if channel_config.get("invert") else 1.0
     zero_count = float(channel_config.get("zero_count", 0))
-    reference_mode = str(channel_config.get("travel_reference", "auto"))
-    reference_method = str(channel_config.get("reference_method", DEFAULT_REFERENCE_METHOD))
-    reference_percentile = float(channel_config.get("reference_percentile", DEFAULT_REFERENCE_PERCENTILE))
-    reference_window_samples = int(
-        channel_config.get("reference_window_samples", DEFAULT_REFERENCE_WINDOW_SAMPLES)
-    )
     velocity_filter_window = _ensure_odd_window(int(channel_config.get("velocity_filter_window", 3)))
     mm_per_count = channel_mm_per_count(channel_config, analog_resolution_bits)
 
@@ -382,10 +230,6 @@ def _channel_arrays(
         manual_reference_count = sign * (manual_raw_reference - zero_count)
     travel_counts, reference_used = apply_travel_reference(
         calibrated_counts,
-        reference_mode,
-        reference_method=reference_method,
-        reference_percentile=reference_percentile,
-        reference_window_samples=reference_window_samples,
         manual_reference_count=manual_reference_count,
     )
     filtered_counts = moving_average(travel_counts, velocity_filter_window)
@@ -637,65 +481,87 @@ def compute_channel_metrics(
     if raw_span not in (None, 0.0) and travel_units == "mm" and used_stroke is not None:
         implied_mm_per_count = used_stroke / raw_span
 
-    occupancy_mean = None
-    occupancy_median = None
-    occupancy_mode = None
-    occupancy_geometric_sd = None
-    travel_band_metrics: list[dict[str, Any]] = []
+    position_mean = None
+    position_median = None
+    position_mode = None
+    position_geometric_sd = None
+    position_band_metrics: list[dict[str, Any]] = []
+    compression_velocity_metrics: list[dict[str, Any]] = []
+    rebound_velocity_metrics: list[dict[str, Any]] = []
     if session_duration > 0.0:
         finite_mask = np.isfinite(travel) & np.isfinite(dt_s) & (dt_s > 0.0)
         if np.any(finite_mask):
             normalized_travel, _ = _occupancy_distribution_values(travel, finite_mask, travel_units)
 
-            occupancy_values = normalized_travel[finite_mask]
-            occupancy_weights = dt_s[finite_mask]
-            occupancy_mean = _weighted_mean(occupancy_values, occupancy_weights)
-            occupancy_median = _weighted_quantile(occupancy_values, occupancy_weights, 0.5)
-            occupancy_mode = _weighted_smoothed_histogram_mode(
-                occupancy_values,
-                occupancy_weights,
+            position_values = normalized_travel[finite_mask]
+            position_weights = dt_s[finite_mask]
+            position_mean = _weighted_mean(position_values, position_weights)
+            position_median = _weighted_quantile(position_values, position_weights, 0.5)
+            position_mode = _weighted_smoothed_histogram_mode(
+                position_values,
+                position_weights,
                 bins=OCCUPANCY_MODE_BINS,
                 histogram_range=(0.0, 100.0),
             )
-            occupancy_geometric_sd = _weighted_geometric_std(occupancy_values, occupancy_weights)
+            position_geometric_sd = _weighted_geometric_std(position_values, position_weights)
 
-            for band_start in range(0, 100, 10):
-                band_end = band_start + 10
+            for band_start in range(0, 100, POSITION_BAND_WIDTH_PCT):
+                band_end = band_start + POSITION_BAND_WIDTH_PCT
                 if band_end < 100:
                     band_mask = finite_mask & (normalized_travel >= float(band_start)) & (normalized_travel < float(band_end))
                 else:
                     band_mask = finite_mask & (normalized_travel >= float(band_start)) & (normalized_travel <= float(band_end))
-                occupancy_pct = 100.0 * float(np.sum(dt_s[band_mask])) / session_duration
-                travel_band_metrics.append(
+                position_pct = 100.0 * float(np.sum(dt_s[band_mask])) / session_duration
+                position_band_metrics.append(
                     {
-                        "metric": f"Occupancy P{band_start}-{band_end}",
-                        "value": occupancy_pct,
+                        "metric": f"Position P{band_start}-{band_end}",
+                        "value": position_pct,
                         "units": "%",
                         "category": "riding",
                     }
                 )
         else:
-            for band_start in range(0, 100, 10):
-                band_end = band_start + 10
-                travel_band_metrics.append(
+            for band_start in range(0, 100, POSITION_BAND_WIDTH_PCT):
+                band_end = band_start + POSITION_BAND_WIDTH_PCT
+                position_band_metrics.append(
                     {
-                        "metric": f"Occupancy P{band_start}-{band_end}",
+                        "metric": f"Position P{band_start}-{band_end}",
                         "value": None,
                         "units": "%",
                         "category": "riding",
                     }
                 )
+
+        velocity_mask = np.isfinite(velocity) & np.isfinite(dt_s) & (dt_s > 0.0)
+        compression_velocity_metrics = _signed_velocity_metrics(
+            velocity,
+            dt_s,
+            velocity_mask & (velocity >= 0.0),
+            session_duration,
+            "Compression velocity",
+            velocity_units,
+        )
+        rebound_velocity_metrics = _signed_velocity_metrics(
+            velocity,
+            dt_s,
+            velocity_mask & (velocity < 0.0),
+            session_duration,
+            "Rebound velocity",
+            velocity_units,
+        )
     else:
-        for band_start in range(0, 100, 10):
-            band_end = band_start + 10
-            travel_band_metrics.append(
+        for band_start in range(0, 100, POSITION_BAND_WIDTH_PCT):
+            band_end = band_start + POSITION_BAND_WIDTH_PCT
+            position_band_metrics.append(
                 {
-                    "metric": f"Occupancy P{band_start}-{band_end}",
+                    "metric": f"Position P{band_start}-{band_end}",
                     "value": None,
                     "units": "%",
                     "category": "riding",
                 }
             )
+        compression_velocity_metrics = _empty_signed_velocity_metrics("Compression velocity", velocity_units)
+        rebound_velocity_metrics = _empty_signed_velocity_metrics("Rebound velocity", velocity_units)
 
     metrics = [
         {"metric": "Session duration", "value": session_duration, "units": "s", "category": "riding"},
@@ -709,14 +575,16 @@ def compute_channel_metrics(
         {"metric": "Minimum travel", "value": min_travel, "units": travel_units, "category": "riding"},
         {"metric": "Maximum travel", "value": max_travel, "units": travel_units, "category": "riding"},
         {"metric": "Used stroke", "value": used_stroke, "units": travel_units, "category": "riding", "metrics_tab_visible": False},
-        {"metric": "Mean occupancy", "value": occupancy_mean, "units": "%", "category": "riding"},
-        {"metric": "Median occupancy", "value": occupancy_median, "units": "%", "category": "riding"},
-        {"metric": "Mode occupancy", "value": occupancy_mode, "units": "%", "category": "riding"},
-        {"metric": "Occupancy geometric SD", "value": occupancy_geometric_sd, "units": "x", "category": "riding"},
-        *travel_band_metrics,
+        {"metric": "Mean position", "value": position_mean, "units": "%", "category": "riding"},
+        {"metric": "Median position", "value": position_median, "units": "%", "category": "riding"},
+        {"metric": "Mode position", "value": position_mode, "units": "%", "category": "riding"},
+        {"metric": "Position geometric SD", "value": position_geometric_sd, "units": "x", "category": "riding"},
+        *position_band_metrics,
+        *compression_velocity_metrics,
+        *rebound_velocity_metrics,
         {"metric": "Peak compression velocity", "value": peak_compression, "units": velocity_units, "category": "riding"},
         {"metric": "Peak rebound velocity", "value": peak_rebound, "units": velocity_units, "category": "riding"},
-        {"metric": "RMS velocity", "value": rms_velocity, "units": velocity_units, "category": "riding"},
+        {"metric": "RMS velocity", "value": rms_velocity, "units": velocity_units, "category": "riding", "metrics_tab_visible": False},
         {"metric": "Time in bottom 10%", "value": time_bottom, "units": "%", "category": "riding", "metrics_tab_visible": False},
         {"metric": "Time in top 10%", "value": time_top, "units": "%", "category": "riding", "metrics_tab_visible": False},
         {"metric": "Raw count span", "value": raw_span, "units": "counts", "category": "hardware"},
@@ -744,10 +612,10 @@ def compute_travel_histogram(
         histogram_range = (0.0, 100.0)
     hist, edges = np.histogram(travel[finite], bins=bins, range=histogram_range, weights=weights[finite])
     session_duration_s = float(np.sum(weights[np.isfinite(weights) & (weights > 0)]))
-    occupancy_label = "Occupancy"
+    occupancy_label = "Time in bin"
     occupancy_units = "s"
     if relative_occupancy:
-        occupancy_label = "Relative occupancy"
+        occupancy_label = "Relative time"
         occupancy_units = "%"
         if session_duration_s > 0.0:
             hist = 100.0 * hist / session_duration_s
@@ -798,10 +666,10 @@ def compute_velocity_histogram(
     hist_positive, _ = np.histogram(display_velocity[positive_mask], bins=edges, weights=weights[positive_mask])
     hist_negative, _ = np.histogram(display_velocity[negative_mask], bins=edges, weights=weights[negative_mask])
     session_duration_s = float(np.sum(weights[np.isfinite(weights) & (weights > 0)]))
-    occupancy_label = "Occupancy"
+    occupancy_label = "Time in bin"
     occupancy_units = "s"
     if relative_occupancy:
-        occupancy_label = "Relative occupancy"
+        occupancy_label = "Relative time"
         occupancy_units = "%"
         if session_duration_s > 0.0:
             scale = 100.0 / session_duration_s
@@ -974,6 +842,94 @@ def _occupancy_distribution_values(
     else:
         occupancy_values[finite_mask] = 100.0 * (travel[finite_mask] - band_min) / band_span
     return occupancy_values, band_span
+
+
+def _range_distribution_values(values: np.ndarray, finite_mask: np.ndarray) -> tuple[np.ndarray, float | None]:
+    normalized_values = np.full(values.shape, np.nan, dtype=np.float64)
+    finite_values = values[finite_mask]
+    if finite_values.size == 0:
+        return normalized_values, None
+    band_min = float(np.min(finite_values))
+    band_max = float(np.max(finite_values))
+    band_span = band_max - band_min
+    if band_span <= 0.0:
+        normalized_values[finite_mask] = 0.0
+    else:
+        normalized_values[finite_mask] = 100.0 * (values[finite_mask] - band_min) / band_span
+    return normalized_values, band_span
+
+
+def _padded_range(values: np.ndarray) -> tuple[float, float]:
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return (-1.0, 1.0)
+    low = float(np.min(finite_values))
+    high = float(np.max(finite_values))
+    if low == high:
+        pad = 1.0 if low == 0.0 else abs(low) * 0.05
+        return (low - pad, high + pad)
+    return (low, high)
+
+
+def _empty_signed_velocity_metrics(prefix: str, velocity_units: str) -> list[dict[str, Any]]:
+    metrics = [
+        {"metric": f"Mean {prefix.lower()}", "value": None, "units": velocity_units, "category": "riding"},
+        {"metric": f"Median {prefix.lower()}", "value": None, "units": velocity_units, "category": "riding"},
+        {"metric": f"Mode {prefix.lower()}", "value": None, "units": velocity_units, "category": "riding"},
+        {"metric": f"{prefix} geometric SD", "value": None, "units": "x", "category": "riding"},
+    ]
+    for band_start in range(0, 100, POSITION_BAND_WIDTH_PCT):
+        band_end = band_start + POSITION_BAND_WIDTH_PCT
+        metrics.append(
+            {
+                "metric": f"{prefix} P{band_start}-{band_end}",
+                "value": None,
+                "units": "%",
+                "category": "riding",
+            }
+        )
+    return metrics
+
+
+def _signed_velocity_metrics(
+    velocity: np.ndarray,
+    dt_s: np.ndarray,
+    sign_mask: np.ndarray,
+    session_duration: float,
+    prefix: str,
+    velocity_units: str,
+) -> list[dict[str, Any]]:
+    metrics = _empty_signed_velocity_metrics(prefix, velocity_units)
+    if session_duration <= 0.0 or not np.any(sign_mask):
+        return metrics
+
+    velocity_values = velocity[sign_mask]
+    velocity_weights = dt_s[sign_mask]
+    replacements: dict[str, float | None] = {
+        f"Mean {prefix.lower()}": _weighted_mean(velocity_values, velocity_weights),
+        f"Median {prefix.lower()}": _weighted_quantile(velocity_values, velocity_weights, 0.5),
+        f"Mode {prefix.lower()}": _weighted_smoothed_histogram_mode(
+            velocity_values,
+            velocity_weights,
+            bins=OCCUPANCY_MODE_BINS,
+            histogram_range=_padded_range(velocity_values),
+        ),
+        f"{prefix} geometric SD": _weighted_geometric_std(np.abs(velocity_values), velocity_weights),
+    }
+    normalized_velocity, _ = _range_distribution_values(velocity, sign_mask)
+    for band_start in range(0, 100, POSITION_BAND_WIDTH_PCT):
+        band_end = band_start + POSITION_BAND_WIDTH_PCT
+        if band_end < 100:
+            band_mask = sign_mask & (normalized_velocity >= float(band_start)) & (normalized_velocity < float(band_end))
+        else:
+            band_mask = sign_mask & (normalized_velocity >= float(band_start)) & (normalized_velocity <= float(band_end))
+        replacements[f"{prefix} P{band_start}-{band_end}"] = 100.0 * float(np.sum(dt_s[band_mask])) / session_duration
+
+    for metric in metrics:
+        metric_name = str(metric["metric"])
+        if metric_name in replacements:
+            metric["value"] = replacements[metric_name]
+    return metrics
 
 
 def _weighted_geometric_std(values: np.ndarray, weights: np.ndarray) -> float | None:

@@ -7,14 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 ANALYSIS_DIRNAME = "analysis"
 CONFIG_FILENAME = "session_config.json"
 DEFAULT_FRONT_FULL_SCALE_MM = 300.0
 DEFAULT_FRONT_SENSOR_FULL_SCALE_MM = 635.0
-DEFAULT_REFERENCE_METHOD = "percentile"
-DEFAULT_REFERENCE_PERCENTILE = 0.001
-DEFAULT_REFERENCE_WINDOW_SAMPLES = 3
 LEGACY_OCCUPANCY_TRAVEL_BINS = 100
 LEGACY_OCCUPANCY_VELOCITY_BINS = 120
 DEFAULT_BREAKDOWN_CONFIG = {
@@ -35,6 +32,42 @@ DEFAULT_BREAKDOWN_CONFIG = {
     "high_compression_velocity_min_pct_s": 300.0,
     "pack_down_window_ms": 600,
     "pack_down_shift_threshold_pct": 8.0,
+}
+DEFAULT_BRAKING_CONFIG = {
+    "threshold_mode": "percentile",
+    "selected_threshold_type": "percentile",
+    "selected_threshold_label": "P80",
+    "decel_percentiles": [40.0, 60.0, 80.0],
+    "absolute_decel_thresholds_mps2": [2.0, 3.0, 4.0, 5.0],
+    "speed_bin_mode": "percentile",
+    "speed_percentile_edges": [0.0, 25.0, 50.0, 75.0, 100.0],
+    "speed_edges_abs_kph": [0.0, 20.0, 35.0, 50.0, 120.0],
+    "valid_speed_min_kph": 2.0,
+    "valid_speed_max_kph": 120.0,
+    "speed_source_min_kph": 0.5,
+    "speed_source_max_kph": 120.0,
+    "speed_smoothing_window_s": 0.20,
+    "valid_abs_accel_max_mps2": 20.0,
+    "coasting_accel_abs_max_mps2": 0.30,
+    "valid_stroke_min_pct": -5.0,
+    "valid_stroke_max_pct": 120.0,
+    "topout_threshold_pct": 2.0,
+    "min_braking_event_duration_s": 0.25,
+    "merge_event_gap_s": 0.10,
+    "min_samples_per_metric_bin": 500,
+    "min_events_per_metric_bin": 5,
+    "topout_caution_pct": 5.0,
+    "topout_high_pct": 10.0,
+    "rough_caution_ratio": 1.2,
+    "rough_high_ratio": 1.5,
+    "dive_low_pct": 4.0,
+    "dive_high_pct": 10.0,
+    "packdown_caution_pct": 3.0,
+    "packdown_high_pct": 6.0,
+    "deep80_caution_pct": 1.0,
+    "deep90_caution_pct": 0.2,
+    "bottom_margin_caution_pct": 10.0,
+    "bottom_margin_high_pct": 5.0,
 }
 
 
@@ -58,10 +91,7 @@ def _default_channel_config(
         "mm_per_count": None,
         "full_scale_mm": full_scale_mm,
         "sensor_full_scale_mm": sensor_full_scale_mm,
-        "travel_reference": "auto",
-        "reference_method": DEFAULT_REFERENCE_METHOD,
-        "reference_percentile": DEFAULT_REFERENCE_PERCENTILE,
-        "reference_window_samples": DEFAULT_REFERENCE_WINDOW_SAMPLES,
+        "travel_reference": "manual",
         "manual_reference_count": None,
         "velocity_filter_window": 3,
     }
@@ -90,6 +120,7 @@ def default_session_config(
             "occupancy_color_scale": "sqrt",
             "velocity_axis_mode": "linear",
         },
+        "braking": copy.deepcopy(DEFAULT_BRAKING_CONFIG),
         "breakdown": copy.deepcopy(DEFAULT_BREAKDOWN_CONFIG),
         "last_derived_at": None,
         "last_derived_signature": None,
@@ -121,28 +152,13 @@ def migrate_session_config(config: dict[str, Any]) -> dict[str, Any]:
     front = config.setdefault("front", {})
     rear = config.setdefault("rear", {})
     plot_defaults = config.setdefault("plot_defaults", {})
+    braking = config.setdefault("braking", {})
     breakdown = config.setdefault("breakdown", {})
     _normalize_front_channel_config(front)
     if schema_version < SCHEMA_VERSION:
         for channel_config in (front, rear):
             if channel_config.get("velocity_filter_window") in (None, 21):
                 channel_config["velocity_filter_window"] = 3
-            if channel_config.get("reference_method") not in {"percentile", "sustained"}:
-                channel_config["reference_method"] = DEFAULT_REFERENCE_METHOD
-            try:
-                reference_percentile = float(
-                    channel_config.get("reference_percentile", DEFAULT_REFERENCE_PERCENTILE)
-                )
-            except (TypeError, ValueError):
-                reference_percentile = DEFAULT_REFERENCE_PERCENTILE
-            channel_config["reference_percentile"] = min(max(reference_percentile, 0.0001), 5.0)
-            try:
-                reference_window_samples = int(
-                    channel_config.get("reference_window_samples", DEFAULT_REFERENCE_WINDOW_SAMPLES)
-                )
-            except (TypeError, ValueError):
-                reference_window_samples = DEFAULT_REFERENCE_WINDOW_SAMPLES
-            channel_config["reference_window_samples"] = max(1, reference_window_samples)
             manual_reference_count = channel_config.get("manual_reference_count")
             if manual_reference_count in ("", None):
                 channel_config["manual_reference_count"] = None
@@ -157,6 +173,11 @@ def migrate_session_config(config: dict[str, Any]) -> dict[str, Any]:
         if plot_defaults.get("occupancy_velocity_bins") in (None, LEGACY_OCCUPANCY_VELOCITY_BINS):
             plot_defaults["occupancy_velocity_bins"] = 400
 
+    for channel_config in (front, rear):
+        channel_config["travel_reference"] = "manual"
+        for obsolete_key in ("reference_method", "reference_percentile", "reference_window_samples"):
+            channel_config.pop(obsolete_key, None)
+
     if schema_version < SCHEMA_VERSION and plot_defaults.get("occupancy_color_scale") in (None, "", "log"):
         plot_defaults["occupancy_color_scale"] = "sqrt"
     if plot_defaults.get("occupancy_color_scale") not in {"linear", "sqrt", "log"}:
@@ -164,6 +185,7 @@ def migrate_session_config(config: dict[str, Any]) -> dict[str, Any]:
     if plot_defaults.get("velocity_axis_mode") not in {"linear", "signed_log"}:
         plot_defaults["velocity_axis_mode"] = "linear"
 
+    config["braking"] = merge_defaults(DEFAULT_BRAKING_CONFIG, braking)
     config["breakdown"] = merge_defaults(DEFAULT_BREAKDOWN_CONFIG, breakdown)
     config["schema_version"] = SCHEMA_VERSION
     return config

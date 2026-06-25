@@ -22,19 +22,18 @@ from scripts.postprocess_gui_app.backend.session_service import open_export_sess
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot a velocity-travel occupancy heatmap from an exported analog.csv file."
+        description="Plot a position/velocity heatmap from an exported analog.csv file."
     )
     parser.add_argument("path", type=Path, help="Path to exported analog.csv")
     parser.add_argument("--channel", choices=("front", "rear"), default="front", help="Which analog channel to plot")
     parser.add_argument("--output", type=Path, help="Output image path. Defaults to <csv stem>_<channel>_heatmap.png")
-    parser.add_argument("--grid-output", type=Path, help="Optional CSV output for the occupancy grid")
+    parser.add_argument("--grid-output", type=Path, help="Optional CSV output for the heatmap grid")
     parser.add_argument("--travel-bins", type=int, default=100, help="Number of travel bins")
     parser.add_argument("--velocity-bins", type=int, default=120, help="Number of velocity bins")
     parser.add_argument(
-        "--travel-reference",
-        choices=("auto", "absolute", "min", "max"),
-        default="auto",
-        help="Travel-reference mode for the selected channel",
+        "--manual-anchor-count",
+        type=float,
+        help="Manual raw ADC anchor count for the selected channel",
     )
     parser.add_argument(
         "--velocity-source",
@@ -70,7 +69,9 @@ def main() -> int:
     bundle = open_export_session(export_dir)
 
     config = copy.deepcopy(bundle.session_config)
-    config[args.channel]["travel_reference"] = args.travel_reference
+    config[args.channel]["travel_reference"] = "manual"
+    if args.manual_anchor_count is not None:
+        config[args.channel]["manual_reference_count"] = args.manual_anchor_count
     config[args.channel]["velocity_filter_window"] = args.smooth_window
     derived_df, _ = build_derived_analog(
         export_dir=export_dir,
@@ -101,12 +102,13 @@ def main() -> int:
         save_occupancy_grid_csv(args.grid_output, occupancy)
 
     print(f"Saved heatmap to {output_path}")
+    manual_anchor = config[args.channel].get("manual_reference_count")
     print(
-        f"  channel={args.channel} travel_reference={config[args.channel]['travel_reference']} "
+        f"  channel={args.channel} manual_anchor={manual_anchor if manual_anchor is not None else 'unset'} "
         f"velocity_source={occupancy['velocity_source']}"
     )
     print(
-        f"  samples={occupancy['sample_count']} occupancy_s={occupancy['total_occupancy_s']:.3f} "
+        f"  samples={occupancy['sample_count']} time_s={occupancy['total_occupancy_s']:.3f} "
         f"travel_range=[{occupancy['travel_range'][0]:.3f}, {occupancy['travel_range'][1]:.3f}] "
         f"velocity_range=[{occupancy['velocity_range'][0]:.3f}, {occupancy['velocity_range'][1]:.3f}]"
     )

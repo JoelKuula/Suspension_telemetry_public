@@ -356,7 +356,7 @@ def _save_velocity_histograms_png(path: Path, bundle: SessionBundle, dpi: int = 
         axis.plot(centers, histogram["positive"], color=colors["positive"], linewidth=1.5, label="Compression (+)")
         axis.plot(centers, histogram["negative"], color=colors["negative"], linewidth=1.5, label="Rebound (-)")
         axis.set_title(f"{channel.capitalize()} velocity histogram")
-        axis.set_ylabel("Occupancy [s]")
+        axis.set_ylabel("Time [s]")
         axis.set_xlabel(f"Velocity [{histogram['units']}]")
         axis.grid(True, alpha=0.2)
         axis.legend(loc="upper right")

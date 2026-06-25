@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import time
 import unittest
 import uuid
@@ -26,6 +27,7 @@ from scripts.postprocess_gui_app.app import (
     parse_optional_float,
 )
 from scripts.postprocess_gui_app.backend.export_service import export_bin_to_directory
+from scripts.postprocess_gui_app.backend.session_config import default_session_config
 from scripts.postprocess_gui_app.backend.session_metadata_service import SessionDatabaseEntry
 from scripts.postprocess_gui_app.backend.session_service import (
     SessionBundle,
@@ -86,9 +88,11 @@ class PostprocessGuiTests(unittest.TestCase):
                 "rear_velocity_stroke_pct_per_s_filtered": [0.0, 15.0 + rear_offset, -12.0 - rear_offset, 6.0 + rear_offset],
             }
         )
+        source_path = Path("data") / f"{session_id}.BIN"
+        export_dir = Path(".codex_tmp") / "test_tmp" / "gui_synthetic" / session_id
         return SessionBundle(
-            source_path=Path("data") / f"{session_id}.BIN",
-            export_dir=Path("exports") / session_id,
+            source_path=source_path,
+            export_dir=export_dir,
             summary={
                 "header": {"analog_resolution_bits": 12},
                 "timing": {"duration_us": 3_000_000},
@@ -97,7 +101,7 @@ class PostprocessGuiTests(unittest.TestCase):
             },
             status_rows=[],
             config_rows=[],
-            session_config={},
+            session_config=default_session_config(source_path, export_dir, 0, 0),
             derived_df=derived_df,
             analog_df=pl.DataFrame(),
             wheel_df=pl.DataFrame(),
@@ -119,15 +123,18 @@ class PostprocessGuiTests(unittest.TestCase):
         window = MainWindow()
         tab_names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
 
-        self.assertEqual(tab_names, ["Session", "Histograms", "Occupancy", "Balance", "Breakdown", "Speed", "Metrics", "Compare"])
+        self.assertEqual(
+            tab_names,
+            ["Session", "Histograms", "Position/Velocity Heatmap", "Balance", "Braking", "Breakdown", "Speed", "Metrics", "Compare"],
+        )
 
     def test_main_window_populates_database_panel_from_scan(self) -> None:
         entry = SessionDatabaseEntry(
-            session_id="LOG00036",
-            export_dir=Path("exports/LOG00036"),
-            source_path=Path("data/LOG00036.BIN"),
+            session_id="LOG00047",
+            export_dir=Path("exports/LOG00047"),
+            source_path=Path("data/LOG00047.BIN"),
             metadata={
-                "session_id": "LOG00036",
+                "session_id": "LOG00047",
                 "date": "2026-04-18",
                 "track": "Test Track",
                 "set_label": "Set 2",
@@ -145,7 +152,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertIn("2026-04-18 | Test Track", window.database_table.item(0, 0).text())
         self.assertEqual(window.database_table.item(0, 1).text(), "1 set(s)")
         self.assertEqual(window.database_table.item(0, 2).text(), "")
-        self.assertEqual(window.database_table.item(1, 0).text(), "LOG00036")
+        self.assertEqual(window.database_table.item(1, 0).text(), "LOG00047")
         self.assertEqual(window.database_table.item(1, 1).text(), "Set 2")
         self.assertEqual(window.database_table.item(1, 2).text(), "dry")
         self.assertEqual(window.current_session_label.text(), "Currently open: -")
@@ -154,7 +161,7 @@ class PostprocessGuiTests(unittest.TestCase):
         window = MainWindow()
         with mock.patch(
             "scripts.postprocess_gui_app.app.QtWidgets.QFileDialog.getOpenFileNames",
-            return_value=(["data/LOG00010.BIN", "data/LOG00020.BIN"], "BIN files (*.BIN *.bin)"),
+            return_value=(["data/LOG00047.BIN", "data/LOG00020.BIN"], "BIN files (*.BIN *.bin)"),
         ), mock.patch.object(window, "run_task") as run_task:
             window.open_bin_dialog()
 
@@ -164,7 +171,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertEqual(callback.__func__, window._on_bin_import_loaded.__func__)
 
     def test_bin_import_callback_loads_latest_session_and_reports_count(self) -> None:
-        older = self._synthetic_compare_bundle("LOG00010", track="Test Track")
+        older = self._synthetic_compare_bundle("LOG00047", track="Test Track")
         older.summary["header"]["start_epoch"] = 1_776_470_400
         older.session_config = {"front": {}, "rear": {}, "plot_defaults": {}}
         older.session_metadata["set_label"] = "Set 1"
@@ -194,28 +201,28 @@ class PostprocessGuiTests(unittest.TestCase):
     def test_database_panel_groups_sets_by_date(self) -> None:
         entries = [
             SessionDatabaseEntry(
-                session_id="LOG00045",
-                export_dir=Path("exports/LOG00045"),
-                source_path=Path("data/LOG00045.BIN"),
+                session_id="LOG00053",
+                export_dir=Path("exports/LOG00053"),
+                source_path=Path("data/LOG00053.BIN"),
                 metadata={
-                    "session_id": "LOG00045",
+                    "session_id": "LOG00053",
                     "date": "2026-04-24",
                     "track": "",
-                    "set_label": "LOG00045",
+                    "set_label": "LOG00053",
                     "comment": "",
                 },
                 summary={"header": {"start_epoch": 1_777_057_492}},
                 sort_timestamp=1_777_057_492,
             ),
             SessionDatabaseEntry(
-                session_id="LOG00040",
-                export_dir=Path("exports/LOG00040"),
-                source_path=Path("data/LOG00040.BIN"),
+                session_id="LOG00047",
+                export_dir=Path("exports/LOG00047"),
+                source_path=Path("data/LOG00047.BIN"),
                 metadata={
-                    "session_id": "LOG00040",
+                    "session_id": "LOG00047",
                     "date": "2026-04-24",
                     "track": "",
-                    "set_label": "LOG00040",
+                    "set_label": "LOG00047",
                     "comment": "",
                 },
                 summary={"header": {"start_epoch": 1_777_054_858}},
@@ -229,9 +236,9 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertIn("2026-04-24 | No track (2 sets)", window.database_table.item(0, 0).text())
         self.assertEqual(window.database_table.item(0, 1).text(), "2 set(s)")
         self.assertEqual(window.database_table.item(0, 2).text(), "")
-        self.assertEqual(window.database_table.item(1, 0).text(), "LOG00045")
-        self.assertEqual(window.database_table.item(1, 1).text(), "LOG00045")
-        self.assertEqual(window.database_table.item(2, 0).text(), "LOG00040")
+        self.assertEqual(window.database_table.item(1, 0).text(), "LOG00053")
+        self.assertEqual(window.database_table.item(1, 1).text(), "LOG00053")
+        self.assertEqual(window.database_table.item(2, 0).text(), "LOG00047")
 
         window.on_database_item_clicked(window.database_table.item(0, 0))
 
@@ -277,8 +284,8 @@ class PostprocessGuiTests(unittest.TestCase):
 
     def test_summary_text_includes_saved_metadata(self) -> None:
         bundle = SessionBundle(
-            source_path=Path("data/LOG00036.BIN"),
-            export_dir=Path("exports/LOG00036"),
+            source_path=Path("data/LOG00047.BIN"),
+            export_dir=Path("exports/LOG00047"),
             summary={"timing": {"duration_us": 1_000_000}, "counts": {}, "record_counts": {}},
             status_rows=[],
             config_rows=[],
@@ -288,7 +295,7 @@ class PostprocessGuiTests(unittest.TestCase):
             wheel_df=pl.DataFrame(),
             imu_frame_df=pl.DataFrame(),
             session_metadata={
-                "session_id": "LOG00036",
+                "session_id": "LOG00047",
                 "date": "2026-04-18",
                 "track": "Test Track",
                 "set_label": "Set 2",
@@ -303,7 +310,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertIn("Duration: 0:01", summary_text)
 
     def test_loading_export_populates_tabs(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
         window = MainWindow()
         window._on_bundle_loaded(bundle)
@@ -319,38 +326,64 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertEqual(window.current_occupancy["front"]["velocity_units"], "%/s")
         self.assertEqual(window.current_occupancy["front"]["velocity_axis_mode"], "linear")
         tab_names = [window.tabs.tabText(index) for index in range(window.tabs.count())]
-        self.assertEqual(tab_names, ["Session", "Histograms", "Occupancy", "Balance", "Breakdown", "Speed", "Metrics", "Compare"])
-        self.assertIn("Mean balance", window.balance_widget.summary_label.text())
+        self.assertEqual(
+            tab_names,
+            ["Session", "Histograms", "Position/Velocity Heatmap", "Balance", "Braking", "Breakdown", "Speed", "Metrics", "Compare"],
+        )
+        self.assertIsNone(window.balance_widget.layout())
+        self.assertGreater(window.braking_widget.key_table.rowCount(), 0)
+        self.assertGreater(window.braking_widget.speed_bin_table.rowCount(), 0)
+        self.assertIn("Wheel-speed deceleration analysis", window.braking_widget.method_label.text())
+        self.assertIn("speed bins", window.braking_widget.method_label.text())
+        self.assertNotIn("FORK BRAKING SUMMARY", window.braking_widget.summary_label.text())
+        self.assertNotIn("Headline metrics", window.braking_widget.summary_label.text())
+        self.assertNotIn("Speed-bin summary", window.braking_widget.summary_label.text())
+        self.assertNotIn("Loaded median stroke", window.braking_widget.summary_label.text())
+        self.assertIn("Selected:", window.braking_widget.summary_label.text())
+        self.assertIn("Coverage:", window.braking_widget.summary_label.text())
+        self.assertTrue(window.braking_widget.scroll_area.widgetResizable())
+        for table in (
+            window.braking_widget.key_table,
+            window.braking_widget.speed_bin_table,
+            window.braking_widget.event_table,
+            window.braking_widget.flag_table,
+        ):
+            self.assertEqual(table.verticalScrollBarPolicy(), QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.assertEqual(table.minimumHeight(), table.maximumHeight())
+            for row in range(table.rowCount()):
+                for column in range(table.columnCount()):
+                    item = table.item(row, column)
+                    if item is not None:
+                        self.assertIsNone(re.search(r"\d+\.\d{3,}", item.text()))
         self.assertIn("Max. Speed", window.wheel_widget.summary_label.text())
         self.assertIn("Mean Speed", window.wheel_widget.summary_label.text())
         self.assertNotIn("Signals", tab_names)
         self.assertNotIn("Context", tab_names)
         self.assertNotIn("IMU", tab_names)
-        self.assertEqual(window.histograms_widget.front_pane.travel_plot.getPlotItem().titleLabel.text, "Front travel occupancy")
-        self.assertEqual(window.histograms_widget.rear_pane.travel_plot.getPlotItem().titleLabel.text, "Rear travel occupancy")
-        self.assertEqual(window.histograms_widget.front_pane.travel_plot.getPlotItem().getAxis("left").labelText, "Relative occupancy")
+        self.assertEqual(window.histograms_widget.front_pane.travel_plot.getPlotItem().titleLabel.text, "Front position distribution")
+        self.assertEqual(window.histograms_widget.rear_pane.travel_plot.getPlotItem().titleLabel.text, "Rear position distribution")
+        self.assertEqual(window.histograms_widget.front_pane.travel_plot.getPlotItem().getAxis("left").labelText, "Relative time")
         self.assertEqual(window.histograms_widget.front_pane.travel_plot.getPlotItem().getAxis("left").labelUnits, "%")
-        self.assertEqual(window.histograms_widget.front_pane.velocity_plot.getPlotItem().getAxis("left").labelText, "Relative occupancy")
+        self.assertEqual(window.histograms_widget.front_pane.velocity_plot.getPlotItem().getAxis("left").labelText, "Relative time")
         self.assertEqual(window.histograms_widget.front_pane.velocity_plot.getPlotItem().getAxis("left").labelUnits, "%")
-        self.assertEqual(window.occupancy_widget.front_pane.plot_widget.getPlotItem().titleLabel.text, "Front occupancy")
-        self.assertEqual(window.occupancy_widget.rear_pane.plot_widget.getPlotItem().titleLabel.text, "Rear occupancy")
-        self.assertGreater(window.breakdown_widget.state_table.rowCount(), 0)
-        self.assertGreater(window.breakdown_widget.event_table.rowCount(), 0)
+        self.assertEqual(window.occupancy_widget.front_pane.plot_widget.getPlotItem().titleLabel.text, "Front position/velocity heatmap")
+        self.assertEqual(window.occupancy_widget.rear_pane.plot_widget.getPlotItem().titleLabel.text, "Rear position/velocity heatmap")
+        self.assertIsNone(window.breakdown_widget.layout())
 
     def test_compare_tab_populates_from_two_loaded_bundles(self) -> None:
-        left_bundle = self._synthetic_compare_bundle("LOG00016", track="Track A")
-        right_bundle = self._synthetic_compare_bundle("LOG00036", track="Track B", front_offset=6.0, rear_offset=4.0)
+        left_bundle = self._synthetic_compare_bundle("LOG00053", track="Track A")
+        right_bundle = self._synthetic_compare_bundle("LOG00047", track="Track B", front_offset=6.0, rear_offset=4.0)
 
         window = MainWindow()
         window._on_compare_bundles_loaded([left_bundle, right_bundle])
 
         self.assertEqual(window.tabs.tabText(window.tabs.currentIndex()), "Compare")
-        self.assertIn("LOG00016", window.compare_widget.summary_label.text())
-        self.assertIn("LOG00036", window.compare_widget.summary_label.text())
-        self.assertEqual(window.compare_widget.front_metrics_table.rowCount(), 20)
-        self.assertEqual(window.compare_widget.rear_metrics_table.rowCount(), 20)
-        self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(1).text(), "2026-04-18 | Track A | LOG00016")
-        self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(2).text(), "2026-04-18 | Track B | LOG00036")
+        self.assertIn("LOG00053", window.compare_widget.summary_label.text())
+        self.assertIn("LOG00047", window.compare_widget.summary_label.text())
+        self.assertEqual(window.compare_widget.front_metrics_table.rowCount(), 47)
+        self.assertEqual(window.compare_widget.rear_metrics_table.rowCount(), 47)
+        self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(1).text(), "2026-04-18 | Track A | LOG00053")
+        self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(2).text(), "2026-04-18 | Track B | LOG00047")
         self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(3).text(), "Units")
         self.assertEqual(window.compare_widget.rear_metrics_group.title(), "Rear riding metrics")
         self.assertNotIn(
@@ -364,10 +397,15 @@ class PostprocessGuiTests(unittest.TestCase):
             window.compare_widget.front_metrics_table.item(row, 0).text()
             for row in range(window.compare_widget.front_metrics_table.rowCount())
         ]
-        self.assertIn("Mean occupancy", metric_names)
-        self.assertIn("Occupancy P0-10", metric_names)
-        self.assertIn("Occupancy P90-100", metric_names)
+        self.assertIn("Mean position", metric_names)
+        self.assertIn("Position P0-10", metric_names)
+        self.assertIn("Position P90-100", metric_names)
+        self.assertIn("Mean compression velocity", metric_names)
+        self.assertIn("Compression velocity P90-100", metric_names)
+        self.assertIn("Mean rebound velocity", metric_names)
+        self.assertIn("Rebound velocity P90-100", metric_names)
         self.assertIn("Peak compression velocity", metric_names)
+        self.assertNotIn("RMS velocity", metric_names)
         self.assertNotIn("Used stroke", metric_names)
         self.assertEqual(
             window.compare_widget.front_metrics_table.verticalScrollBarPolicy(),
@@ -377,15 +415,15 @@ class PostprocessGuiTests(unittest.TestCase):
             window.compare_widget.rear_metrics_table.verticalScrollBarPolicy(),
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
         )
-        self.assertEqual(window.compare_widget.front_travel_plot.getPlotItem().getAxis("left").labelText, "Relative occupancy")
+        self.assertEqual(window.compare_widget.front_travel_plot.getPlotItem().getAxis("left").labelText, "Relative time")
         self.assertEqual(window.compare_widget.front_travel_plot.getPlotItem().getAxis("left").labelUnits, "%")
-        self.assertEqual(window.compare_widget.front_velocity_plot.getPlotItem().getAxis("left").labelText, "Relative occupancy")
+        self.assertEqual(window.compare_widget.front_velocity_plot.getPlotItem().getAxis("left").labelText, "Relative time")
         self.assertEqual(window.compare_widget.front_velocity_plot.getPlotItem().getAxis("left").labelUnits, "%")
         self.assertIn("BarGraphItem", [type(item).__name__ for item in window.compare_widget.front_velocity_plot.getPlotItem().items])
 
     def test_compare_tab_accepts_ten_loaded_bundles(self) -> None:
         bundles = [
-            self._synthetic_compare_bundle(f"LOG000{10 + index}", track="Track A", front_offset=float(index), rear_offset=float(index))
+            self._synthetic_compare_bundle(f"SYN{index:02d}", track="Track A", front_offset=float(index), rear_offset=float(index))
             for index in range(10)
         ]
 
@@ -394,10 +432,10 @@ class PostprocessGuiTests(unittest.TestCase):
 
         self.assertEqual(len(window.compare_bundles), 10)
         self.assertEqual(window.compare_widget.front_metrics_table.columnCount(), 12)
-        self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(10).text(), "2026-04-18 | Track A | LOG00019")
+        self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(10).text(), "2026-04-18 | Track A | SYN09")
         self.assertEqual(window.compare_widget.front_metrics_table.horizontalHeaderItem(11).text(), "Units")
-        self.assertIn("LOG00010", window.status_label.text())
-        self.assertIn("LOG00019", window.status_label.text())
+        self.assertIn("SYN00", window.status_label.text())
+        self.assertIn("SYN09", window.status_label.text())
 
     def test_signed_log_velocity_axis_updates_plot_views(self) -> None:
         bundle = self._synthetic_compare_bundle("LOG00997", track="Track A")
@@ -417,10 +455,7 @@ class PostprocessGuiTests(unittest.TestCase):
             "mm_per_count": None,
             "full_scale_mm": 300.0,
             "sensor_full_scale_mm": 635.0,
-            "travel_reference": "auto",
-            "reference_method": "percentile",
-            "reference_percentile": 0.001,
-            "reference_window_samples": 3,
+            "travel_reference": "manual",
             "manual_reference_count": None,
             "velocity_filter_window": 3,
         }
@@ -449,43 +484,66 @@ class PostprocessGuiTests(unittest.TestCase):
         )
 
     def test_metrics_tab_separates_riding_and_hardware_tables(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
         window = MainWindow()
         window._on_bundle_loaded(bundle)
 
-        self.assertGreater(window.metrics_table.rowCount(), 10)
+        self.assertEqual(window.metrics_table.columnCount(), 13)
+        self.assertEqual(window.metrics_table.rowCount(), 17)
+        self.assertEqual(window.metrics_table.horizontalHeaderItem(1).text(), "Front position")
+        self.assertEqual(window.metrics_table.horizontalHeaderItem(3).text(), "Front compression")
+        self.assertEqual(window.metrics_table.horizontalHeaderItem(5).text(), "Front rebound")
+        self.assertEqual(window.metrics_table.horizontalHeaderItem(7).text(), "Rear position")
+        self.assertEqual(window.metrics_table.horizontalHeaderItem(9).text(), "Rear compression")
+        self.assertEqual(window.metrics_table.horizontalHeaderItem(11).text(), "Rear rebound")
         self.assertEqual(window.metrics_table.item(0, 0).text(), "Session duration")
         self.assertRegex(window.metrics_table.item(0, 1).text(), r"\d+\.\d+ \(\d+:\d{2}\)")
-        self.assertTrue(any(window.metrics_table.item(row, 0).text() == "Mean occupancy" for row in range(window.metrics_table.rowCount())))
-        self.assertTrue(any(window.metrics_table.item(row, 0).text() == "Median occupancy" for row in range(window.metrics_table.rowCount())))
-        self.assertTrue(any(window.metrics_table.item(row, 0).text() == "Mode occupancy" for row in range(window.metrics_table.rowCount())))
-        self.assertTrue(any(window.metrics_table.item(row, 0).text() == "Occupancy geometric SD" for row in range(window.metrics_table.rowCount())))
-        self.assertTrue(any(window.metrics_table.item(row, 0).text() == "Occupancy P0-10" for row in range(window.metrics_table.rowCount())))
-        self.assertTrue(any(window.metrics_table.item(row, 0).text() == "Occupancy P90-100" for row in range(window.metrics_table.rowCount())))
         metric_names = [window.metrics_table.item(row, 0).text() for row in range(window.metrics_table.rowCount())]
         self.assertNotIn("Used stroke", metric_names)
-        self.assertEqual(metric_names.index("Occupancy P0-10"), metric_names.index("Occupancy geometric SD") + 1)
-        self.assertGreater(metric_names.index("Peak compression velocity"), metric_names.index("Occupancy P90-100"))
+        self.assertIn("Mean", metric_names)
+        self.assertIn("Median", metric_names)
+        self.assertIn("Mode", metric_names)
+        self.assertIn("Geometric SD", metric_names)
+        self.assertIn("P0-10", metric_names)
+        self.assertIn("P90-100", metric_names)
+        self.assertNotIn("RMS", metric_names)
+        self.assertEqual(metric_names.index("P0-10"), metric_names.index("Geometric SD") + 1)
+        mean_row = metric_names.index("Mean")
+        p90_row = metric_names.index("P90-100")
+        self.assertTrue(window.metrics_table.item(mean_row, 1).text())
+        self.assertEqual(window.metrics_table.item(mean_row, 2).text(), "%")
+        self.assertTrue(window.metrics_table.item(mean_row, 3).text())
+        self.assertEqual(window.metrics_table.item(mean_row, 4).text(), "%/s")
+        self.assertTrue(window.metrics_table.item(mean_row, 5).text())
+        self.assertEqual(window.metrics_table.item(mean_row, 6).text(), "%/s")
+        self.assertTrue(window.metrics_table.item(p90_row, 3).text())
+        self.assertEqual(window.metrics_table.item(p90_row, 4).text(), "%")
+        self.assertTrue(window.metrics_table.item(p90_row, 5).text())
+        self.assertEqual(window.metrics_table.item(p90_row, 6).text(), "%")
         self.assertEqual(window.hardware_metrics_table.rowCount(), 7)
         self.assertEqual(window.hardware_metrics_table.item(0, 0).text(), "Analog sample count")
 
-    def test_breakdown_tab_populates_state_events_and_findings_for_strong_speed_session(self) -> None:
-        export_dir = self._copy_export("LOG00016")
-        bundle = open_export_session(export_dir)
+    def test_breakdown_tab_stays_blank_for_loaded_session(self) -> None:
+        bundle = self._synthetic_compare_bundle("LOG00998", track="Track A")
         window = MainWindow()
         window._on_bundle_loaded(bundle)
 
-        self.assertGreater(window.breakdown_widget.state_table.rowCount(), 0)
-        self.assertGreater(window.breakdown_widget.event_table.rowCount(), 0)
-        self.assertGreater(window.breakdown_widget.finding_table.rowCount(), 0)
-        self.assertEqual(window.breakdown_widget.state_table.horizontalHeaderItem(0).text(), "Speed band")
-        self.assertEqual(window.breakdown_widget.event_table.horizontalHeaderItem(3).text(), "Timestamp [s]")
-        self.assertEqual(window.breakdown_widget.detail_table.columnCount(), 3)
-        self.assertIn("BarGraphItem", [type(item).__name__ for item in window.histograms_widget.front_pane.velocity_plot.getPlotItem().items])
+        self.assertIsNone(window.breakdown_widget.layout())
+
+    def test_braking_tab_shows_no_data_state_without_wheel_speed(self) -> None:
+        bundle = self._synthetic_compare_bundle("LOG00998", track="Track A")
+        bundle.wheel_df = pl.DataFrame()
+        window = MainWindow()
+        window._on_bundle_loaded(bundle)
+
+        self.assertEqual(window.braking_widget.key_table.rowCount(), 0)
+        self.assertEqual(window.braking_widget.speed_bin_table.rowCount(), 0)
+        self.assertIn("Wheel speed", window.braking_widget.summary_label.text())
+        self.assertGreater(window.braking_widget.flag_table.rowCount(), 0)
 
     def test_histogram_velocity_plot_omits_all_series(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
         window = MainWindow()
         window._on_bundle_loaded(bundle)
@@ -497,21 +555,13 @@ class PostprocessGuiTests(unittest.TestCase):
         ]
         self.assertEqual(len(bar_items), 2)
 
-    def test_breakdown_tab_warns_when_speed_coverage_is_weak(self) -> None:
-        export_dir = self._copy_export("LOG00010")
-        bundle = open_export_session(export_dir)
+    def test_breakdown_tab_stays_blank_for_weak_speed_session(self) -> None:
+        bundle = self._synthetic_compare_bundle("LOG00999", track="Track A")
+        bundle.wheel_df = pl.DataFrame()
         window = MainWindow()
         window._on_bundle_loaded(bundle)
 
-        self.assertFalse(window.breakdown_widget.warning_label.isHidden())
-        self.assertNotEqual(window.breakdown_widget.warning_label.text(), "")
-        self.assertEqual(window.breakdown_widget.state_table.rowCount(), 0)
-        self.assertGreater(window.breakdown_widget.event_table.rowCount(), 0)
-        finding_titles = [
-            window.breakdown_widget.finding_table.item(row, 1).text()
-            for row in range(window.breakdown_widget.finding_table.rowCount())
-        ]
-        self.assertTrue(any("Wheel speed coverage" in title for title in finding_titles))
+        self.assertIsNone(window.breakdown_widget.layout())
 
     def test_wheel_plot_starts_at_zero_before_first_pulse(self) -> None:
         widget = WheelPlotWidget()
@@ -562,7 +612,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.min(sampled_y)), 0.0, places=6)
 
     def test_summary_text_includes_rtc_start(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
 
         summary_text = build_summary_text(bundle)
@@ -570,7 +620,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertIn("RTC start:", summary_text)
 
     def test_rebuild_with_calibration_updates_loaded_bundle(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
         config = copy.deepcopy(bundle.session_config)
         config["front"]["mm_per_count"] = 0.1
@@ -583,7 +633,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertGreater(window.metrics_table.rowCount(), 0)
 
     def test_refresh_views_previews_unsaved_calibration_controls(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
         window = MainWindow()
         window._on_bundle_loaded(bundle)
@@ -603,7 +653,7 @@ class PostprocessGuiTests(unittest.TestCase):
 
         self.assertAlmostEqual(preview_first, rebuilt_first, places=9)
 
-    def test_calibration_controls_gather_reference_settings_and_manual_anchor(self) -> None:
+    def test_calibration_controls_gather_manual_anchor_only(self) -> None:
         bundle = self._synthetic_compare_bundle("LOG00998", track="Track A")
         channel_config = {
             "zero_count": 1000,
@@ -611,10 +661,7 @@ class PostprocessGuiTests(unittest.TestCase):
             "mm_per_count": None,
             "full_scale_mm": 300.0,
             "sensor_full_scale_mm": 635.0,
-            "travel_reference": "auto",
-            "reference_method": "percentile",
-            "reference_percentile": 0.001,
-            "reference_window_samples": 3,
+            "travel_reference": "manual",
             "manual_reference_count": None,
             "velocity_filter_window": 3,
         }
@@ -629,19 +676,15 @@ class PostprocessGuiTests(unittest.TestCase):
         window.populate_controls_from_bundle(bundle)
 
         controls = window.channel_controls["front"]
-        controls["reference_mode"].setCurrentText("robust_min")
-        controls["reference_method"].setCurrentText("sustained")
-        controls["reference_percentile"].setValue(0.01)
-        controls["reference_window"].setValue(5)
         controls["manual_reference"].setText("1048.5")
         window.velocity_axis_combo.setCurrentIndex(window.velocity_axis_combo.findData("signed_log"))
 
         config = window.gather_session_config()
 
-        self.assertEqual(config["front"]["travel_reference"], "robust_min")
-        self.assertEqual(config["front"]["reference_method"], "sustained")
-        self.assertAlmostEqual(config["front"]["reference_percentile"], 0.01, places=6)
-        self.assertEqual(config["front"]["reference_window_samples"], 5)
+        self.assertEqual(config["front"]["travel_reference"], "manual")
+        self.assertNotIn("reference_method", config["front"])
+        self.assertNotIn("reference_percentile", config["front"])
+        self.assertNotIn("reference_window_samples", config["front"])
         self.assertAlmostEqual(config["front"]["manual_reference_count"], 1048.5, places=6)
         self.assertEqual(config["plot_defaults"]["velocity_axis_mode"], "signed_log")
 
@@ -652,20 +695,14 @@ class PostprocessGuiTests(unittest.TestCase):
             "front": {
                 "zero_count": 1200,
                 "invert": True,
-                "travel_reference": "robust_min",
-                "reference_method": "sustained",
-                "reference_percentile": 0.01,
-                "reference_window_samples": 5,
+                "travel_reference": "manual",
                 "manual_reference_count": 1203.0,
                 "velocity_filter_window": 7,
             },
             "rear": {
                 "zero_count": 2200,
                 "invert": False,
-                "travel_reference": "auto",
-                "reference_method": "percentile",
-                "reference_percentile": 0.001,
-                "reference_window_samples": 3,
+                "travel_reference": "manual",
                 "manual_reference_count": None,
                 "velocity_filter_window": 3,
             },
@@ -677,13 +714,13 @@ class PostprocessGuiTests(unittest.TestCase):
             "front": {
                 "zero_count": 999,
                 "invert": False,
-                "travel_reference": "auto",
+                "travel_reference": "manual",
                 "manual_reference_count": None,
             },
             "rear": {
                 "zero_count": 1999,
                 "invert": True,
-                "travel_reference": "max",
+                "travel_reference": "manual",
                 "manual_reference_count": 2400.0,
             },
         }
@@ -694,12 +731,12 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertEqual(updated["plot_defaults"]["selected_channel"], "front")
         self.assertEqual(updated["front"]["zero_count"], 999)
         self.assertTrue(updated["front"]["invert"])
-        self.assertEqual(updated["front"]["travel_reference"], "robust_min")
-        self.assertEqual(updated["front"]["reference_method"], "sustained")
+        self.assertEqual(updated["front"].get("travel_reference"), "manual")
+        self.assertNotIn("reference_method", updated["front"])
         self.assertAlmostEqual(updated["front"]["manual_reference_count"], 1203.0, places=6)
         self.assertEqual(updated["rear"]["zero_count"], 1999)
         self.assertFalse(updated["rear"]["invert"])
-        self.assertEqual(updated["rear"]["travel_reference"], "auto")
+        self.assertEqual(updated["rear"].get("travel_reference"), "manual")
 
     def test_apply_calibration_to_all_confirms_and_starts_background_task(self) -> None:
         bundle = self._synthetic_compare_bundle("LOG00998", track="Track A")
@@ -709,10 +746,7 @@ class PostprocessGuiTests(unittest.TestCase):
             "mm_per_count": None,
             "full_scale_mm": 300.0,
             "sensor_full_scale_mm": 635.0,
-            "travel_reference": "auto",
-            "reference_method": "percentile",
-            "reference_percentile": 0.001,
-            "reference_window_samples": 3,
+            "travel_reference": "manual",
             "manual_reference_count": None,
             "velocity_filter_window": 3,
         }
@@ -724,18 +758,18 @@ class PostprocessGuiTests(unittest.TestCase):
         }
         entries = [
             SessionDatabaseEntry(
-                session_id="LOG00010",
-                export_dir=Path("exports/LOG00010"),
-                source_path=Path("data/LOG00010.BIN"),
-                metadata={"session_id": "LOG00010"},
+                session_id="LOG00047",
+                export_dir=Path("exports/LOG00047"),
+                source_path=Path("data/LOG00047.BIN"),
+                metadata={"session_id": "LOG00047"},
                 summary={"header": {"start_epoch": 1}},
                 sort_timestamp=1,
             ),
             SessionDatabaseEntry(
-                session_id="LOG00011",
-                export_dir=Path("exports/LOG00011"),
-                source_path=Path("data/LOG00011.BIN"),
-                metadata={"session_id": "LOG00011"},
+                session_id="LOG00053",
+                export_dir=Path("exports/LOG00053"),
+                source_path=Path("data/LOG00053.BIN"),
+                metadata={"session_id": "LOG00053"},
                 summary={"header": {"start_epoch": 2}},
                 sort_timestamp=2,
             ),
@@ -762,7 +796,7 @@ class PostprocessGuiTests(unittest.TestCase):
         self.assertEqual(callback.__func__, window._on_all_calibrations_applied.__func__)
 
     def test_view_settings_change_refreshes_only_plot_views(self) -> None:
-        export_dir = self._copy_export("LOG00016")
+        export_dir = self._copy_export("LOG00053")
         bundle = open_export_session(export_dir)
         window = MainWindow()
         window._on_bundle_loaded(bundle)

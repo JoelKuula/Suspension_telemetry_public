@@ -9,7 +9,7 @@ This repo is intended to be useful to riders and builders who want to inspect, a
 ## Prototype Status
 - Active firmware scope: analog travel logging, front wheel pulse logging, status diagnostics, RTC-backed session metadata, and microSD binary session files.
 - Active hardware baseline: Teensy 4.1, string potentiometer travel sensors, front wheel reed switch, handlebar logging switch, microSD storage, RTC battery, and USB power-bank supply.
-- Active analysis scope: binary inspection/export, desktop post-processing, occupancy/histogram views, speed checks, balance views, breakdown tables, and comparison workflows.
+- Active analysis scope: binary inspection/export, desktop post-processing, occupancy/histogram views, speed checks, balance views, braking analysis, breakdown tables, and comparison workflows.
 - Deferred scope: active `ISM330DHCX` IMU logging, wireless telemetry, live dashboards, phone/cloud integration, and automatic suspension tuning recommendations.
 
 Read [`DISCLAIMER.md`](DISCLAIMER.md) before using this on a bike.
@@ -18,6 +18,7 @@ For the first public snapshot, see [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 ## Repository Layout
 - [`HARDWARE.md`](HARDWARE.md): current hardware stack, mounting assumptions, and pinout.
+- [`planned-design-notes.md`](planned-design-notes.md): planned post-processing analysis ideas and method notes, including the braking-analysis direction.
 - [`platformio.ini`](platformio.ini): PlatformIO project configuration for Teensy 4.1 firmware.
 - [`src/main.cpp`](src/main.cpp): current integrated logger firmware.
 - [`src/uploadcheck_blink.cpp`](src/uploadcheck_blink.cpp): minimal upload-check firmware using the external status LED on pin `14`.
@@ -98,7 +99,7 @@ python scripts/postprocess_quicklook.py --input data/LOG00036.BIN
 Default outputs are written under `exports/<session>/analysis/quicklook/`.
 
 ## Sample Data
-The repo keeps selected raw `.BIN` files under [`data/`](data) so users can try the parser, exporter, quicklook script, and GUI without first building hardware.
+The repo keeps selected raw `.BIN` files under [`data/`](data), including the newer `LOG00041.BIN` through `LOG00053.BIN` sessions, so users can try the parser, exporter, quicklook script, GUI, and braking-analysis workflow without first building hardware.
 
 Generated CSV exports, derived Parquet caches, plots, and per-session local calibration files are ignored because they can be regenerated from the raw `.BIN` files.
 

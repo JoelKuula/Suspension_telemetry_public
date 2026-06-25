@@ -12,6 +12,11 @@ First public prototype snapshot of the DIY suspension telemetry project.
 - Installation reference photos.
 - Prototype STL files for printed parts.
 
+
+## Post-processing GUI update
+- Added the Python Braking view.
+- Added newer raw `.BIN` sample sessions (`LOG00041.BIN` through `LOG00053.BIN`) so people can try the current GUI and analysis paths with real data.
+
 ## Known Limitations
 - Prototype only; not a certified safety device or professional suspension tuning system.
 - Active IMU logging is deferred until the logger can be mounted rigidly enough for useful inertial data.

@@ -146,7 +146,7 @@ def save_occupancy_grid_csv(path: Path, occupancy: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["velocity_center", "travel_center", "occupancy_s"])
+        writer.writerow(["velocity_center", "travel_center", "time_s"])
         for travel_index, travel_center in enumerate(travel_centers):
             for velocity_index, velocity_center in enumerate(velocity_centers):
                 writer.writerow(
@@ -185,12 +185,12 @@ def save_occupancy_heatmap_png(path: Path, occupancy: dict[str, Any], dpi: int =
     )
     axis.set_xlabel(f"{occupancy.get('velocity_label', 'Velocity')} [{occupancy['velocity_units']}]")
     axis.set_ylabel(f"{occupancy.get('travel_label', 'Travel')} [{occupancy['travel_units']}]")
-    axis.set_title(f"{occupancy['channel'].capitalize()} velocity-travel occupancy")
+    axis.set_title(f"{occupancy['channel'].capitalize()} position/velocity heatmap")
     axis_ticks = occupancy.get("velocity_axis_ticks") or []
     if axis_ticks:
         axis.set_xticks([position for position, _label in axis_ticks])
         axis.set_xticklabels([label for _position, label in axis_ticks])
-    figure.colorbar(mesh, ax=axis, label="Occupancy [s]")
+    figure.colorbar(mesh, ax=axis, label="Time [s]")
     figure.tight_layout()
     figure.savefig(path, dpi=dpi)
     plt.close(figure)
