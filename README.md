@@ -2,15 +2,14 @@
 
 DIY suspension telemetry logger and post-processing tools for enduro and motocross bikes.
 
-The current project state is a prototype. The active logger slice uses a Teensy 4.1 to record front fork travel, rear shock stroke, front wheel pulse timing, status records, and RTC-backed session start timestamps. Legacy IMU logs remain supported by the analysis tooling, but active IMU logging is deferred until the logger can be mounted rigidly enough for useful inertial data.
+The current project state is a prototype. The active logger slice uses a Teensy 4.1 to record front fork travel, rear shock stroke, front wheel pulse timing, status records, and RTC-backed session start timestamps.
 
 This repo is intended to be useful to riders and builders who want to inspect, adapt, or improve the system. It is not a certified product or a complete suspension tuning solution.
 
 ## Prototype Status
 - Active firmware scope: analog travel logging, front wheel pulse logging, status diagnostics, RTC-backed session metadata, and microSD binary session files.
-- Active hardware baseline: Teensy 4.1, string potentiometer travel sensors, front wheel reed switch, handlebar logging switch, microSD storage, RTC battery, and USB power-bank supply.
-- Active analysis scope: binary inspection/export, desktop post-processing, occupancy/histogram views, speed checks, balance views, braking analysis, breakdown tables, and comparison workflows.
-- Deferred scope: active `ISM330DHCX` IMU logging, wireless telemetry, live dashboards, phone/cloud integration, and automatic suspension tuning recommendations.
+- Active hardware baseline: Teensy 4.1, string potentiometer travel sensors (front only for now), front wheel reed switch, handlebar logging switch, microSD storage, RTC battery, and USB power-bank supply.
+- Active analysis scope: binary inspection/export, desktop post-processing, occupancy/histogram views, speed checks, balance views (tbd), braking analysis, breakdown tables (tbd), and comparison workflows.
 
 Read [`DISCLAIMER.md`](DISCLAIMER.md) before using this on a bike.
 
@@ -18,7 +17,6 @@ For the first public snapshot, see [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 ## Repository Layout
 - [`HARDWARE.md`](HARDWARE.md): current hardware stack, mounting assumptions, and pinout.
-- [`planned-design-notes.md`](planned-design-notes.md): planned post-processing analysis ideas and method notes, including the braking-analysis direction.
 - [`platformio.ini`](platformio.ini): PlatformIO project configuration for Teensy 4.1 firmware.
 - [`src/main.cpp`](src/main.cpp): current integrated logger firmware.
 - [`src/uploadcheck_blink.cpp`](src/uploadcheck_blink.cpp): minimal upload-check firmware using the external status LED on pin `14`.
@@ -82,8 +80,8 @@ Main views:
 - `Session`: export summary, record counts, and status/fault rows.
 - `Histograms`: front and rear travel plus velocity occupancy distributions.
 - `Occupancy`: front and rear velocity-travel heatmaps.
-- `Balance`: front/rear normalized travel comparison.
-- `Breakdown`: riding-state, event, finding, and data-quality tables.
+- `Balance`: front/rear normalized travel comparison (tbd).
+- `Breakdown`: riding-state, event, finding, and data-quality tables (tbd).
 - `Speed`: front wheel pulse-derived speed and pulse period.
 - `Metrics`: per-channel stroke, velocity, and ADC checks.
 - `Compare`: multi-session comparison workflow.
