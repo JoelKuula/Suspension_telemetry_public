@@ -81,6 +81,7 @@ Main views:
 - `Histograms`: front and rear travel plus velocity occupancy distributions.
 - `Occupancy`: front and rear velocity-travel heatmaps.
 - `Balance`: front/rear normalized travel comparison (tbd).
+- `Braking`: front braking behavior.
 - `Breakdown`: riding-state, event, finding, and data-quality tables (tbd).
 - `Speed`: front wheel pulse-derived speed and pulse period.
 - `Metrics`: per-channel stroke, velocity, and ADC checks.
